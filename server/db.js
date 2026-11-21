@@ -141,6 +141,16 @@ CREATE TABLE IF NOT EXISTS mindmaps (
   updated_at TEXT NOT NULL,
   UNIQUE(session_id, step_index)
 );
+CREATE TABLE IF NOT EXISTS step_marks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  subject_id INTEGER NOT NULL REFERENCES subjects(id) ON DELETE CASCADE,
+  session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  step_index INTEGER NOT NULL DEFAULT 0,
+  mark TEXT NOT NULL,                           -- self 自己能懂 | helped 靠讲解/帮助才懂 | stuck 还是不懂
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(subject_id, session_id, step_index)
+);
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT NOT NULL UNIQUE,                -- 登录名，唯一
@@ -173,6 +183,38 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
 {
   const cols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
   if (!cols.includes('avatar')) db.exec("ALTER TABLE users ADD COLUMN avatar TEXT NOT NULL DEFAULT ''");
+}
+// notes 表加 kind/style/知识点归属。
+// kind: step 步笔记 | node 知识点笔记 | overview 一页纸总览 | glossary 术语表 | cheatsheet 速查表 | mindmap 思维导图（知识点导图单独存一行，content 是树 JSON）
+// 其中 overview/glossary/cheatsheet 是各自页签的文档，不进知识库列表；知识库只收 step/node/mindmap（教学中点名生成的文档）。
+// style: '' 未记录 | easy 易懂版 | pro 专业简洁版（生成时由用户选，记在每份笔记上）
+{
+  const cols = db.prepare('PRAGMA table_info(notes)').all().map((c) => c.name);
+  if (!cols.includes('kind')) db.exec("ALTER TABLE notes ADD COLUMN kind TEXT NOT NULL DEFAULT 'step'");
+  if (!cols.includes('style')) db.exec("ALTER TABLE notes ADD COLUMN style TEXT NOT NULL DEFAULT ''");
+  if (!cols.includes('node_id')) db.exec('ALTER TABLE notes ADD COLUMN node_id INTEGER REFERENCES nodes(id) ON DELETE CASCADE');
+  if (!cols.includes('node_title')) db.exec("ALTER TABLE notes ADD COLUMN node_title TEXT NOT NULL DEFAULT ''");
+}
+// 费曼通过状态：session 级存一份 {stepIndex: {passed, rounds, updated_at}}，重进课堂能看到哪步已讲清。
+{
+  const cols = db.prepare('PRAGMA table_info(sessions)').all().map((c) => c.name);
+  if (!cols.includes('feynman_json')) db.exec("ALTER TABLE sessions ADD COLUMN feynman_json TEXT NOT NULL DEFAULT ''");
+}
+// 旧 subject_docs（总览/术语表/速查表）迁入 notes 表：notes 里还没有同科目同 kind 的才迁，
+// 原表保留不动当备份；迁完之后读写都走 notes（见 index.js 的 getDoc/upsertDoc），在各自页签展示、不进知识库列表。
+{
+  const KIND_MAP = { overview: 'overview', terms: 'glossary', cheatsheet: 'cheatsheet' };
+  const TITLE_MAP = { overview: '一页纸总览', terms: '术语表', cheatsheet: '速查表' };
+  const docs = db.prepare('SELECT * FROM subject_docs').all();
+  for (const d of docs) {
+    const kind = KIND_MAP[d.kind];
+    if (!kind) continue;
+    const exists = db.prepare('SELECT id FROM notes WHERE subject_id=? AND kind=?').get(d.subject_id, kind);
+    if (exists) continue;
+    db.prepare(
+      'INSERT INTO notes (subject_id, session_id, step_index, step_title, title, content, kind, style, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)'
+    ).run(d.subject_id, null, -1, '', TITLE_MAP[d.kind] || d.kind, d.content, kind, '', d.created_at, d.updated_at);
+  }
 }
 
 const now = () => new Date().toISOString();

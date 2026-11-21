@@ -74,13 +74,15 @@ function processAvatarFile(file) {
   });
 }
 
-// 品牌吉祥物：用户选定的 logo 图（绿猫头鹰抱学科书，client/public/logo.webp）；E 首页欢迎区用，F 不出现
+// 品牌吉祥物：用户选定的 logo 图（绿猫头鹰抱学科书，client/public/logo.webp）；
+// 顶栏小标 + 登录页品牌区两套皮肤都用，E 首页欢迎区另有大图，F 首页不出现
 
 export default function App() {
   const [view, setView] = useState({ name: 'home' });
   const [theme, setTheme] = useState(getInitialTheme);
   const [me, setMe] = useState(undefined); // undefined=还没查 / null=未登录 / 对象=已登录的用户
   const [hasUsers, setHasUsers] = useState(false);
+  const topbarRef = useRef(null);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     try {
@@ -112,13 +114,31 @@ export default function App() {
     setView({ name: 'home' });
   }
 
-  // 已经有账号、但还没登录时，只给登录/注册页（数据接口也会 401 兜底）。
-  const mustLogin = me !== undefined && hasUsers && !me;
-  const showAuth = view.name === 'auth' || mustLogin;
+  // 登录墙：没登录就只能看到登录/注册页——首页、科目、课堂、个人中心、设置全部进不去，
+  // 空库初始状态也一样（只许注册第一个账号）。服务端数据接口同样一律 401 兜底。
+  const showAuth = view.name === 'auth' || (me !== undefined && !me);
+
+  // 顶栏高度实测写回 --topbar-h：顶栏在窄屏会折行、真实高度比写死值大，
+  // 课堂操作栏（.sticky-head）按写死值贴位就会裂开一条缝、滚动时内容从缝里滑过。
+  // 量到多少就贴多少，折行也不怕。
+  useEffect(() => {
+    const el = topbarRef.current;
+    if (!el) return;
+    const apply = () => {
+      document.documentElement.style.setProperty('--topbar-h', `${el.offsetHeight}px`);
+    };
+    apply();
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(apply);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+  }, [showAuth, me]);
 
   return (
     <div className="app">
-      <header className="topbar">
+      {!showAuth && (
+      <header className="topbar" ref={topbarRef}>
         <div className="brand" onClick={() => setView({ name: 'home' })}>
           <img className="brand-logo" src="/logo.webp" alt="多学堂" />
           <span className="brand-name">
@@ -133,13 +153,12 @@ export default function App() {
               <AvatarFace user={me} className="avatar-circle" />
               <span className="avatar-name">{me.username}</span>
             </button>
-          ) : hasUsers ? (
-            <button onClick={() => setView({ name: 'auth' })}>登录 / 注册</button>
           ) : (
-            <button onClick={() => setView({ name: 'profile' })}>个人中心</button>
+            <button onClick={() => setView({ name: 'auth' })}>登录 / 注册</button>
           )}
         </nav>
       </header>
+      )}
       <main
         className={
           view.name === 'session' ? 'page session-page' : view.name === 'profile' && !showAuth ? 'page page-wide' : 'page'
@@ -165,6 +184,8 @@ export default function App() {
             {view.name === 'subject' && (
               <SubjectView
                 subjectId={view.subjectId}
+                initialTab={view.tab}
+                openNoteId={view.openNoteId}
                 onOpenSession={(sessionId, focusStep) =>
                   setView({ name: 'session', subjectId: view.subjectId, sessionId, focusStep })
                 }
@@ -177,6 +198,9 @@ export default function App() {
                 focusStep={view.focusStep}
                 theme={theme}
                 onBack={() => setView({ name: 'subject', subjectId: view.subjectId })}
+                onOpenNote={(entryId) =>
+                  setView({ name: 'subject', subjectId: view.subjectId, tab: 'notes', openNoteId: entryId })
+                }
               />
             )}
           </>
@@ -209,18 +233,12 @@ function AuthPage({ hasUsers, onAuthed }) {
 
   return (
     <div className="auth-wrap">
-      <div className="card">
-        <div className="row-between">
-          <h3>{mode === 'login' ? '登录多学堂' : '注册新账号'}</h3>
-          <div className="theme-switch" role="group" aria-label="登录或注册">
-            <button type="button" className={mode === 'login' ? 'ts-btn active' : 'ts-btn'} onClick={() => { setMode('login'); setError(''); }}>
-              登录
-            </button>
-            <button type="button" className={mode === 'register' ? 'ts-btn active' : 'ts-btn'} onClick={() => { setMode('register'); setError(''); }}>
-              注册
-            </button>
-          </div>
-        </div>
+      <div className="auth-brand">
+        <img className="auth-logo" src="/logo.webp" alt="多学堂" />
+        <h1 className="auth-title">多学堂</h1>
+        <p className="auth-tagline">什么都能学的 AI 学习空间</p>
+      </div>
+      <div className="auth-form">
         {!hasUsers && mode === 'register' && (
           <div className="notice friendly">这是第一个账号：注册之后，现在已有的科目和学习数据都会归到你名下。</div>
         )}
@@ -243,12 +261,26 @@ function AuthPage({ hasUsers, onAuthed }) {
         </label>
         {error && <div className="notice warn">{error}</div>}
         <button className="primary auth-submit" onClick={submit} disabled={busy || !username.trim() || !password}>
-          {busy ? '请稍等…' : mode === 'login' ? '登录' : '注册并登录'}
+          {busy ? '请稍等…' : mode === 'login' ? '登录' : '注册'}
         </button>
-        <p className="muted">
-          {mode === 'login' ? '还没有账号？点右上角「注册」开一个。' : '已经有账号了？点右上角「登录」。'}
-          密码只存加密后的样子，谁也看不到原文。
+        <p className="auth-switch-line">
+          {mode === 'login' ? (
+            <>
+              还没有账号？
+              <button type="button" className="auth-link" onClick={() => { setMode('register'); setError(''); }}>
+                去注册
+              </button>
+            </>
+          ) : (
+            <>
+              已有账号？
+              <button type="button" className="auth-link" onClick={() => { setMode('login'); setError(''); }}>
+                去登录
+              </button>
+            </>
+          )}
         </p>
+        <p className="muted auth-privacy">密码只存加密后的样子，谁也看不到原文。</p>
       </div>
     </div>
   );
@@ -328,22 +360,18 @@ function ProfilePage({ user, onLogout, onGoAuth, onUserChange }) {
     }
   }
 
-  // 还没人注册时的访客态：给注册/登录的引子，设置照样能用（设置是全家共用一份）。
+  // 登录墙之下个人中心不会在未登录时被打开；这里只是兜底，真到了就引去登录。
   if (!user) {
     return (
       <div>
         <h1>个人中心</h1>
         <div className="card">
-          <h3>先注册一个账号吧</h3>
-          <p className="muted">
-            现在还没有任何账号，数据先这么放着。你注册的第一个账号会把现有的科目和学习数据都认领到自己名下；
-            之后每个人登录看到的都是自己的数据。
-          </p>
+          <h3>先登录吧</h3>
+          <p className="muted">个人中心和设置都要登录后才能进。</p>
           <button className="primary" onClick={onGoAuth}>
-            去注册 / 登录
+            去登录 / 注册
           </button>
         </div>
-        <Settings />
       </div>
     );
   }
@@ -837,6 +865,64 @@ function Settings() {
   const [modelsMsg, setModelsMsg] = useState('');
   const [modelsOk, setModelsOk] = useState(null); // null=获取中 / true=成功 / false=失败
   const [modelsBusy, setModelsBusy] = useState(false);
+  const [showModels, setShowModels] = useState(false); // 模型列表默认收起，点「选择模型」才展开
+  // 音色试听：只合成一句固定样例播放，不改已选/已保存的音色
+  const [previewVoice, setPreviewVoice] = useState(''); // 正在试听（加载或播放中）的音色 id
+  const [previewMsg, setPreviewMsg] = useState('');
+  const previewAudioRef = useRef(null);
+  const previewUrlRef = useRef(null);
+
+  function stopPreview() {
+    if (previewAudioRef.current) {
+      try {
+        previewAudioRef.current.pause();
+      } catch {
+        /* ignore */
+      }
+      previewAudioRef.current = null;
+    }
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = null;
+    }
+    setPreviewVoice('');
+  }
+  useEffect(() => () => stopPreview(), []);
+  async function playPreview(voiceId) {
+    if (previewVoice === voiceId) {
+      stopPreview(); // 播放中再点就停
+      return;
+    }
+    stopPreview(); // 切到另一个音色前先停掉前一个
+    setPreviewMsg('');
+    setPreviewVoice(voiceId);
+    try {
+      const resp = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: '你好，我是你的学习老师，这一课我们来讲清楚这个概念。', voice: voiceId }),
+      });
+      if (!resp.ok) throw new Error('合成失败');
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      previewUrlRef.current = url;
+      const audio = new Audio(url);
+      previewAudioRef.current = audio;
+      audio.onended = () => {
+        if (previewAudioRef.current === audio) stopPreview();
+      };
+      audio.onerror = () => {
+        if (previewAudioRef.current === audio) {
+          stopPreview();
+          setPreviewMsg('试听播放失败，检查一下网络再试。');
+        }
+      };
+      await audio.play();
+    } catch {
+      stopPreview();
+      setPreviewMsg('试听没成功：云端语音暂时连不上，检查网络再试（不影响已保存的音色）。');
+    }
+  }
 
   useEffect(() => {
     api.get('/api/settings').then((s) => {
@@ -921,7 +1007,7 @@ function Settings() {
           />
         </label>
         <label>
-          模型名（点下方列表选，也可以手动输入）
+          模型名（可以手动输入，也可以点「选择模型」从列表里挑）
           <input
             value={form.model}
             onChange={(e) => setForm({ ...form, model: e.target.value })}
@@ -934,31 +1020,40 @@ function Settings() {
             ))}
           </datalist>
         </label>
-        {modelList.length > 0 && (
-          <div className="model-picker" role="listbox" aria-label="可选模型列表">
-            {modelList.map((m) => (
-              <button
-                type="button"
-                key={m}
-                role="option"
-                aria-selected={m === form.model}
-                className={'model-option' + (m === form.model ? ' selected' : '')}
-                onClick={() => setForm({ ...form, model: m })}
-              >
-                <span className="model-option-name">{m}</span>
-                {m === form.model && <Icon name="check" size={15} />}
-              </button>
-            ))}
-          </div>
-        )}
+        {showModels &&
+          (modelList.length > 0 ? (
+            <div className="model-picker" role="listbox" aria-label="可选模型列表">
+              {modelList.map((m) => (
+                <button
+                  type="button"
+                  key={m}
+                  role="option"
+                  aria-selected={m === form.model}
+                  className={'model-option' + (m === form.model ? ' selected' : '')}
+                  onClick={() => {
+                    setForm({ ...form, model: m });
+                    setShowModels(false); // 选完自动收起
+                  }}
+                >
+                  <span className="model-option-name">{m}</span>
+                  {m === form.model && <Icon name="check" size={15} />}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="notice">还没有获取过模型列表：先点下面「获取模型列表」从接口拉一次，就能在这里点选了；也可以直接在输入框里手填模型名。</div>
+          ))}
         <div className="row">
+          <button type="button" onClick={() => setShowModels((v) => !v)}>
+            {showModels ? '收起列表' : '选择模型'}
+          </button>
           <button onClick={fetchModels} disabled={modelsBusy}>
             <Icon name="refresh-cw" size={15} /> {modelsBusy ? '正在获取…' : '获取模型列表'}
           </button>
           <span className="muted">
             {modelList.length
               ? `共 ${modelList.length} 个模型 · 上次获取：${fmtFetchTime(modelsFetchedAt)}${modelsFromCache ? '（缓存）' : ''}，点按钮可重新获取`
-              : '还没有获取过模型列表：点按钮从接口拉一次，之后在输入框下方点选就行。'}
+              : '还没有获取过模型列表：点按钮从接口拉一次，之后点「选择模型」展开点选就行。'}
           </span>
         </div>
         {modelsMsg && (
@@ -1019,19 +1114,38 @@ function Settings() {
         </p>
         <div className="model-picker" role="listbox" aria-label="朗读音色">
           {TTS_VOICES.map((v) => (
-            <button
-              type="button"
-              key={v.id}
-              role="option"
-              aria-selected={v.id === form.ttsVoice}
-              className={'model-option' + (v.id === form.ttsVoice ? ' selected' : '')}
-              onClick={() => setForm({ ...form, ttsVoice: v.id })}
-            >
-              <span className="model-option-name">{v.label}</span>
-              {v.id === form.ttsVoice && <Icon name="check" size={15} />}
-            </button>
+            <div key={v.id} className={'model-option voice-option' + (v.id === form.ttsVoice ? ' selected' : '')}>
+              <button
+                type="button"
+                role="option"
+                aria-selected={v.id === form.ttsVoice}
+                className="voice-main"
+                onClick={() => setForm({ ...form, ttsVoice: v.id })}
+              >
+                <span className="model-option-name">{v.label}</span>
+                {v.id === form.ttsVoice && <Icon name="check" size={15} />}
+              </button>
+              <button
+                type="button"
+                className="small voice-preview-btn"
+                onClick={() => playPreview(v.id)}
+                title={previewVoice === v.id ? '停止试听' : `试听${v.label}`}
+              >
+                {previewVoice === v.id ? (
+                  <>
+                    <Icon name="square" size={12} filled /> 停止
+                  </>
+                ) : (
+                  <>
+                    <Icon name="volume-2" size={14} /> 试听
+                  </>
+                )}
+              </button>
+            </div>
           ))}
         </div>
+        <p className="muted">试听只放一句样例听听音色，不会改变你已选的音色；选好后记得点「保存」。</p>
+        {previewMsg && <div className="notice warn">{previewMsg}</div>}
         <button className="primary" onClick={save}>
           保存
         </button>
@@ -1042,11 +1156,13 @@ function Settings() {
 }
 
 // ---------------- 科目页 ----------------
-function SubjectView({ subjectId, onOpenSession, onBack }) {
+function SubjectView({ subjectId, onOpenSession, onBack, initialTab, openNoteId: openNoteIdProp }) {
   const [data, setData] = useState(null);
   const [docs, setDocs] = useState({ overview: null, terms: null, cheatsheet: null });
   const [notesCount, setNotesCount] = useState(0);
-  const [tab, setTab] = useState('lessons');
+  const [tab, setTab] = useState(initialTab || 'lessons');
+  // 从课堂/图谱「去知识库看」跳进来时，要自动打开的那份文档（entryId）
+  const [openNoteId, setOpenNoteId] = useState(openNoteIdProp || '');
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
@@ -1114,7 +1230,7 @@ function SubjectView({ subjectId, onOpenSession, onBack }) {
           ['review', '复习'],
           ['terms', '术语表'],
           ['cheat', '速查表'],
-          ['notes', `笔记库（${notesCount}）`],
+          ['notes', `知识库（${notesCount}）`],
           ['import', '导入知识点'],
         ].map(([k, label]) => (
           <button key={k} className={tab === k ? 'tab active' : 'tab'} onClick={() => setTab(k)}>
@@ -1125,14 +1241,66 @@ function SubjectView({ subjectId, onOpenSession, onBack }) {
       {tab === 'lessons' && (
         <LessonsTab subjectId={subjectId} sessions={sessions} onOpenSession={onOpenSession} reload={load} />
       )}
-      {tab === 'graph' && <GraphTab nodes={nodes} edges={edges} />}
+      {tab === 'graph' && (
+        <GraphTab
+          nodes={nodes}
+          edges={edges}
+          subjectId={subjectId}
+          onOpenNote={(entryId) => {
+            setOpenNoteId(entryId);
+            setTab('notes');
+          }}
+        />
+      )}
       {tab === 'cards' && <CardsTab subjectId={subjectId} onJumpToStep={jumpToStep} />}
       {tab === 'review' && <ReviewTab subjectId={subjectId} onOpenSession={onOpenSession} />}
       {tab === 'terms' && <TermsTab subjectId={subjectId} doc={docs.terms} reload={load} />}
       {tab === 'cheat' && <CheatTab subjectId={subjectId} subjectTitle={subject.title} doc={docs.cheatsheet} reload={load} />}
-      {tab === 'notes' && <NotesTab subjectId={subjectId} onOpenSession={onOpenSession} />}
+      {tab === 'notes' && (
+        <NotesTab
+          subjectId={subjectId}
+          subjectTitle={subject.title}
+          sessions={sessions}
+          onOpenSession={onOpenSession}
+          openEntryId={openNoteId}
+          onConsumeOpen={() => setOpenNoteId('')}
+        />
+      )}
       {tab === 'import' && <ImportTab subjectId={subjectId} reload={load} />}
     </div>
+  );
+}
+
+const NOTE_STYLE_LABEL = { easy: '易懂版', pro: '专业简洁版' };
+// 笔记风格选择（与课堂步笔记同一套口径：易懂版大白话带例子 / 专业简洁版只留干货），选一次记住。
+function useNoteStyle() {
+  const [style, setStyle] = useState(() => {
+    try {
+      return localStorage.getItem('lsw-note-style') === 'pro' ? 'pro' : 'easy';
+    } catch {
+      return 'easy';
+    }
+  });
+  const change = (v) => {
+    setStyle(v);
+    try {
+      localStorage.setItem('lsw-note-style', v);
+    } catch {
+      /* 存不了就算了 */
+    }
+  };
+  return [style, change];
+}
+function NoteStyleToggle({ style, onChange }) {
+  return (
+    <span className="theme-switch" role="group" aria-label="生成风格">
+      <button type="button" className={style === 'easy' ? 'ts-btn active' : 'ts-btn'} onClick={() => onChange('easy')}>
+        易懂版
+      </button>
+      <button type="button" className={style === 'pro' ? 'ts-btn active' : 'ts-btn'} onClick={() => onChange('pro')}>
+        专业简洁版
+      </button>
+    </span>
   );
 }
 
@@ -1141,12 +1309,13 @@ function OverviewCard({ subjectId, doc, reload }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [open, setOpen] = useState(true);
+  const [style, setStyle] = useNoteStyle();
 
   async function generate() {
     setBusy(true);
     setError('');
     try {
-      await api.post(`/api/subjects/${subjectId}/overview`);
+      await api.post(`/api/subjects/${subjectId}/overview`, { style });
       reload();
     } catch (e) {
       setError(e.message);
@@ -1162,6 +1331,8 @@ function OverviewCard({ subjectId, doc, reload }) {
           <Icon name="sparkles" size={18} /> 一页纸总览（先搭骨架）
         </h3>
         <span className="row">
+          {doc && doc.style && <span className="badge">{NOTE_STYLE_LABEL[doc.style] || doc.style}</span>}
+          <NoteStyleToggle style={style} onChange={setStyle} />
           {doc && (
             <button className="small" onClick={() => setOpen(!open)}>
               {open ? '收起' : '展开'}
@@ -1182,11 +1353,12 @@ function OverviewCard({ subjectId, doc, reload }) {
 function TermsTab({ subjectId, doc, reload }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [style, setStyle] = useNoteStyle();
   async function generate() {
     setBusy(true);
     setError('');
     try {
-      await api.post(`/api/subjects/${subjectId}/terms`);
+      await api.post(`/api/subjects/${subjectId}/terms`, { style });
       reload();
     } catch (e) {
       setError(e.message);
@@ -1201,7 +1373,9 @@ function TermsTab({ subjectId, doc, reload }) {
         <button className="primary" onClick={generate} disabled={busy}>
           <Icon name="bookmark" size={15} /> {busy ? '正在整理术语…' : doc ? '重新生成术语表' : '生成术语表'}
         </button>
-        <span className="muted">先把这科的生词扫掉：每个关键词一句人话解释，混个脸熟再上课。</span>
+        <NoteStyleToggle style={style} onChange={setStyle} />
+        {doc && doc.style && <span className="badge">当前：{NOTE_STYLE_LABEL[doc.style] || doc.style}</span>}
+        <span className="muted">先把这科的生词扫掉：每个关键词一句解释，混个脸熟再上课。</span>
       </div>
       {error && <div className="notice warn">{error}</div>}
       {!doc && <p className="muted">还没有术语表，点上面的按钮生成一份。</p>}
@@ -1222,11 +1396,19 @@ function TermsTab({ subjectId, doc, reload }) {
 function CheatTab({ subjectId, subjectTitle, doc, reload }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [style, setStyle] = useNoteStyle();
+  const [errHint, setErrHint] = useState(''); // 本次生成是否结合了真实错因
   async function generate() {
     setBusy(true);
     setError('');
+    setErrHint('');
     try {
-      await api.post(`/api/subjects/${subjectId}/cheatsheet`);
+      const r = await api.post(`/api/subjects/${subjectId}/cheatsheet`, { style });
+      setErrHint(
+        r.usedRealErrors
+          ? '这次的易错点是按你在这科真实练习里的错因写的。'
+          : '这科还没有真实练习错因，易错点先按通用情况写（正文里有标注）。'
+      );
       reload();
     } catch (e) {
       setError(e.message);
@@ -1250,13 +1432,16 @@ function CheatTab({ subjectId, subjectTitle, doc, reload }) {
         <button className="primary" onClick={generate} disabled={busy}>
           <Icon name="file-text" size={15} /> {busy ? '正在整理速查表…' : doc ? '重新生成速查表' : '生成速查表'}
         </button>
+        <NoteStyleToggle style={style} onChange={setStyle} />
+        {doc && doc.style && <span className="badge">当前：{NOTE_STYLE_LABEL[doc.style] || doc.style}</span>}
         {doc && (
           <button onClick={download}>
             <Icon name="download" size={15} /> 下载 Markdown
           </button>
         )}
-        <span className="muted">一页纸：核心概念 + 关系主线 + 易错点，考前扫一眼。</span>
+        <span className="muted">一页纸：核心概念 + 关系主线 + 易错点（有真实练习错因时优先按你的错因写），考前扫一眼。</span>
       </div>
+      {errHint && <div className="notice friendly">{errHint}</div>}
       {error && <div className="notice warn">{error}</div>}
       {!doc && <p className="muted">还没有速查表，点上面的按钮生成一份（学过的内容越多，它总结得越准）。</p>}
       {doc && (
@@ -1268,15 +1453,54 @@ function CheatTab({ subjectId, subjectTitle, doc, reload }) {
   );
 }
 
-function NotesTab({ subjectId, onOpenSession }) {
-  const [notes, setNotes] = useState([]);
-  const [selected, setSelected] = useState(null); // 完整笔记（含 content / mindmap）
+// 知识库只收三类文档：步笔记、知识点笔记、思维导图——都是老师在教学中应学生要求生成的。
+// 总览/术语表/速查表在各自页签里，不进这个库。
+const NOTE_KIND_LABEL = {
+  step: '步笔记',
+  node: '知识点笔记',
+  mindmap: '思维导图',
+};
+
+// 把一段文本存成 .md 文件下载（笔记文档导出）。
+function downloadMarkdownFile(title, text) {
+  const name = `${String(title || '笔记').replace(/[\\/:*?"<>|]/g, ' ').trim() || '笔记'}.md`;
+  const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+// 思维导图（树 JSON）转成 Markdown 大纲；老数据的 mermaid 文本没法转，就原样给出。
+function mindmapToMarkdown(data) {
+  try {
+    const tree = typeof data === 'string' ? JSON.parse(data) : data;
+    if (!tree || typeof tree !== 'object' || !tree.title) throw new Error('not a tree');
+    const lines = [`# ${tree.title}`, ''];
+    const walk = (node, depth) => {
+      for (const child of node.children || []) {
+        lines.push(`${'  '.repeat(depth)}- ${child.title}`);
+        walk(child, depth + 1);
+      }
+    };
+    walk(tree, 0);
+    return lines.join('\n');
+  } catch {
+    return String(data || '');
+  }
+}
+
+function NotesTab({ subjectId, subjectTitle, sessions, onOpenSession, openEntryId, onConsumeOpen }) {
+  const [entries, setEntries] = useState([]);
+  const [filter, setFilter] = useState('all');
+  const [selected, setSelected] = useState(null); // 打开看的条目详情 {entry, full}
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
     try {
-      setNotes(await api.get(`/api/subjects/${subjectId}/notes`));
+      setEntries(await api.get(`/api/subjects/${subjectId}/notes`));
     } catch (e) {
       setError(e.message);
     }
@@ -1285,20 +1509,69 @@ function NotesTab({ subjectId, onOpenSession }) {
     load();
   }, [load]);
 
-  async function open(id) {
+  // 从课堂/图谱点「去知识库看」跳进来：列表加载好后自动打开那份文档
+  useEffect(() => {
+    if (!openEntryId || !entries.length) return;
+    const entry = entries.find((e) => e.entryId === openEntryId);
+    if (entry) open(entry);
+    if (onConsumeOpen) onConsumeOpen();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openEntryId, entries]);
+
+  // 某节课是这个科目的第几节课（只数正课，复习课不占号）
+  function lessonNoOf(sessionId) {
+    if (!sessionId || !Array.isArray(sessions)) return 0;
+    const lessons = sessions.filter((s) => s.kind === 'lesson').map((s) => s.id).sort((a, b) => a - b);
+    const idx = lessons.indexOf(sessionId);
+    return idx >= 0 ? idx + 1 : 0;
+  }
+
+  async function open(entry) {
     setError('');
     try {
-      setSelected(await api.get(`/api/notes/${id}`));
+      let full = null;
+      if (entry.entryId.startsWith('sm')) {
+        full = await api.get(`/api/mindmaps/${entry.mindmapId}`);
+      } else {
+        full = await api.get(`/api/notes/${entry.noteId}`);
+      }
+      setSelected({ entry, full });
     } catch (e) {
       setError(e.message);
     }
   }
-  async function genMindmap() {
-    if (!selected) return;
+  async function remove(entry) {
+    const label = NOTE_KIND_LABEL[entry.kind] || '条目';
+    if (!confirm(`删掉这份${label}《${entry.title}》？删了就没了。`)) return;
+    setError('');
+    try {
+      await api.del(`/api/notes/${entry.entryId}`);
+      if (selected && selected.entry.entryId === entry.entryId) setSelected(null);
+      load();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+  async function genNoteMindmap() {
+    if (!selected || !selected.full || !selected.full.id) return;
     setBusy('mindmap');
     setError('');
     try {
-      setSelected(await api.post(`/api/notes/${selected.id}/mindmap`));
+      const full = await api.post(`/api/notes/${selected.full.id}/mindmap`);
+      setSelected({ entry: selected.entry, full });
+      load();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy('');
+    }
+  }
+  async function genNodeMindmap() {
+    if (!selected || !selected.entry.node_id) return;
+    setBusy('mindmap');
+    setError('');
+    try {
+      await api.post(`/api/nodes/${selected.entry.node_id}/mindmap`);
       load();
     } catch (e) {
       setError(e.message);
@@ -1308,67 +1581,140 @@ function NotesTab({ subjectId, onOpenSession }) {
   }
 
   if (selected) {
+    const { entry, full } = selected;
+    const kind = entry.kind;
+    const isMindmapEntry = kind === 'mindmap';
+    const mapContent = isMindmapEntry ? (entry.entryId.startsWith('nm') ? full.mindmap : full.content) : full.mindmap;
+    // 知识点笔记的导图是库里独立的一行（kind=mindmap 且 node_id 相同）
+    const linkedMap = kind === 'node' ? entries.find((e) => e.kind === 'mindmap' && e.node_id === entry.node_id) : null;
+    const lessonNo = lessonNoOf(entry.session_id);
+    function downloadDoc() {
+      if (isMindmapEntry) {
+        downloadMarkdownFile(entry.title, mindmapToMarkdown(mapContent));
+      } else {
+        downloadMarkdownFile(entry.title, `# ${entry.title}\n\n${full.content || ''}`);
+      }
+    }
     return (
       <div>
         <div className="row">
           <button className="small" onClick={() => setSelected(null)}>
-            <Icon name="arrow-left" size={15} /> 返回笔记库
+            <Icon name="arrow-left" size={15} /> 返回知识库
           </button>
-          {selected.session_id && (
-            <button className="small" onClick={() => onOpenSession(selected.session_id, selected.step_index)}>
+          {entry.session_id && kind === 'step' && (
+            <button className="small" onClick={() => onOpenSession(entry.session_id, entry.step_index)}>
               回到课堂这一步
             </button>
           )}
+          <button className="small" onClick={downloadDoc}>
+            <Icon name="download" size={15} /> 下载 Markdown
+          </button>
+          <button className="danger small" onClick={() => remove(entry)}>
+            删除这份{NOTE_KIND_LABEL[kind] || '文档'}
+          </button>
         </div>
         <h3>
-          <Icon name="sticky-note" size={18} /> {selected.title}
+          <Icon name={isMindmapEntry ? 'network' : 'sticky-note'} size={18} /> {entry.title}
+          <span className="badge">{NOTE_KIND_LABEL[kind] || kind}</span>
+          {entry.style && <span className="badge">{NOTE_STYLE_LABEL[entry.style] || entry.style}</span>}
         </h3>
         <p className="muted">
-          第 {selected.step_index + 1} 步 · {selected.step_title} · 更新于 {new Date(selected.updated_at).toLocaleString()}
+          {subjectTitle && `科目《${subjectTitle}》 · `}
+          {kind === 'step' && `${lessonNo ? `第 ${lessonNo} 节课 · ` : ''}第 ${entry.step_index + 1} 步「${entry.step_title}」 · `}
+          {kind === 'node' && `知识点「${entry.node_title}」 · `}
+          {isMindmapEntry && entry.step_title && `第 ${entry.step_index + 1} 步「${entry.step_title}」 · `}
+          {isMindmapEntry && entry.node_title && `知识点「${entry.node_title}」 · `}
+          生成于 {new Date(entry.created_at).toLocaleString()}
+          {entry.updated_at !== entry.created_at && ` · 最近更新 ${new Date(entry.updated_at).toLocaleString()}`}
         </p>
-        <div className="card">
-          <Markdown text={selected.content} />
-        </div>
-        <div className="card">
-          <div className="row-between">
-            <h3>
-              <Icon name="network" size={18} /> 思维导图
-            </h3>
-            <button className="small" onClick={genMindmap} disabled={busy === 'mindmap'}>
-              {busy === 'mindmap' ? '正在画图…' : selected.mindmap ? '重新生成' : '生成思维导图'}
-            </button>
+        {error && <div className="notice warn">{error}</div>}
+        {!isMindmapEntry && (
+          <div className="card">
+            <Markdown text={full.content} />
           </div>
-          {error && <div className="notice warn">{error}</div>}
-          {selected.mindmap ? (
-            <MindmapView data={selected.mindmap} onRegenerate={genMindmap} />
-          ) : (
-            <p className="muted">还没有思维导图：把这份笔记画成一张图，中心是主题、分支是要点。</p>
-          )}
-        </div>
+        )}
+        {(kind === 'step' || kind === 'node' || isMindmapEntry) && (
+          <div className="card">
+            <div className="row-between">
+              <h3>
+                <Icon name="network" size={18} /> 思维导图
+              </h3>
+              {!isMindmapEntry &&
+                (kind === 'step' ? (
+                  <button className="small" onClick={genNoteMindmap} disabled={busy === 'mindmap'}>
+                    {busy === 'mindmap' ? '正在画图…' : full.mindmap ? '重新生成' : '生成思维导图'}
+                  </button>
+                ) : (
+                  <button className="small" onClick={genNodeMindmap} disabled={busy === 'mindmap'}>
+                    {busy === 'mindmap' ? '正在画图…' : linkedMap ? '重新生成' : '生成思维导图'}
+                  </button>
+                ))}
+            </div>
+            {isMindmapEntry || kind === 'step' ? (
+              mapContent ? (
+                <MindmapView data={mapContent} />
+              ) : (
+                <p className="muted">还没有思维导图：把这份内容画成一张图，中心是主题、分支是要点。</p>
+              )
+            ) : linkedMap ? (
+              <p className="muted">
+                这份知识点笔记有一张思维导图，在知识库列表里点「{entry.title} · 思维导图」那一条看（或回图谱页在知识点下面看）。
+              </p>
+            ) : (
+              <p className="muted">还没有思维导图：点右上角生成一张，中心是这个知识点、分支是它的要点。</p>
+            )}
+          </div>
+        )}
       </div>
     );
   }
 
+  const kindsPresent = ['all', ...Object.keys(NOTE_KIND_LABEL).filter((k) => entries.some((e) => e.kind === k))];
+  const shown = filter === 'all' ? entries : entries.filter((e) => e.kind === filter);
   return (
     <div>
-      <p className="muted">笔记不会自动生成：在课堂里学完一步，点那一步的「生成笔记」，老师才把这节内容整理成笔记存到这里。同一步再点一次是往后追加增补，不会覆盖。</p>
+      <p className="muted">
+        这里只放老师在上课时按你的要求生成的文档：每一步的笔记、知识点的笔记和思维导图。你在课堂里点「生成笔记」或「思维导图」，老师就把那一步的讲解、你的预测和练习错因整理成一份文档存到这里。总览、术语表、速查表在各自的页签里，不放在这个库里。
+      </p>
+      {entries.length > 1 && (
+        <div className="row lib-filters">
+          {kindsPresent.map((k) => (
+            <button key={k} className={filter === k ? 'tab active' : 'tab'} onClick={() => setFilter(k)}>
+              {k === 'all' ? '全部' : NOTE_KIND_LABEL[k]}
+            </button>
+          ))}
+        </div>
+      )}
       {error && <div className="notice warn">{error}</div>}
-      {notes.length === 0 && <p className="muted">还没有笔记，去课堂里学一步、点「生成笔记」试试。</p>}
+      {entries.length === 0 && (
+        <p className="muted">还没有文档。去课堂里学完一步，点「生成笔记」或「思维导图」，老师整理好的文档就会出现在这里。</p>
+      )}
+      {entries.length > 0 && shown.length === 0 && <p className="muted">这一类暂时还没有。</p>}
       <ul className="plain-list">
-        {notes.map((n) => (
-          <li key={n.id} className="card row-between">
-            <span className="linklike" onClick={() => open(n.id)}>
-              <Icon name="sticky-note" size={15} /> 第 {n.step_index + 1} 步 · {n.title}
-              {n.has_mindmap ? <span className="badge">有思维导图</span> : null}
+        {shown.map((e) => (
+          <li key={e.entryId} className="card row-between">
+            <span className="linklike" onClick={() => open(e)}>
+              <Icon name={e.kind === 'mindmap' ? 'network' : 'sticky-note'} size={15} /> {e.title}
+              <span className="badge">{NOTE_KIND_LABEL[e.kind] || e.kind}</span>
+              {e.style && <span className="badge">{NOTE_STYLE_LABEL[e.style] || e.style}</span>}
+              {e.kind === 'step' && e.has_mindmap ? <span className="badge">有思维导图</span> : null}
             </span>
-            <span className="muted">{new Date(n.updated_at).toLocaleString()} 更新</span>
+            <span className="row">
+              <span className="muted">
+                {e.updated_at !== e.created_at
+                  ? `${new Date(e.updated_at).toLocaleString()} 更新`
+                  : `${new Date(e.created_at).toLocaleString()} 生成`}
+              </span>
+              <button className="danger small" onClick={() => remove(e)}>
+                删除
+              </button>
+            </span>
           </li>
         ))}
       </ul>
     </div>
   );
 }
-
 function LessonsTab({ subjectId, sessions, onOpenSession, reload }) {
   const [materialPath, setMaterialPath] = useState('');
   const [showFiles, setShowFiles] = useState(false);
@@ -1438,20 +1784,165 @@ function LessonsTab({ subjectId, sessions, onOpenSession, reload }) {
   );
 }
 
-function GraphTab({ nodes, edges }) {
+function GraphTab({ nodes, edges, subjectId, onOpenNote }) {
   const byId = Object.fromEntries(nodes.map((n) => [n.id, n.title]));
+  const [entries, setEntries] = useState([]); // 知识库条目（找知识点笔记/导图用）
+  const [picking, setPicking] = useState(0); // 正在给哪个知识点选笔记风格（nodeId）
+  const [busy, setBusy] = useState('');
+  const [msg, setMsg] = useState('');
+  const [savedEntry, setSavedEntry] = useState(''); // 刚存进知识库的那份文档的 entryId
+  const [openNote, setOpenNote] = useState(null); // 展开看的知识点笔记全文
+  const [openMap, setOpenMap] = useState({}); // nodeId -> 导图内容（展开看的）
+
+  const loadEntries = useCallback(async () => {
+    try {
+      setEntries(await api.get(`/api/subjects/${subjectId}/notes`));
+    } catch {
+      /* 图谱本身不受影响 */
+    }
+  }, [subjectId]);
+  useEffect(() => {
+    loadEntries();
+  }, [loadEntries]);
+
+  const nodeNoteOf = (nodeId) => entries.find((e) => e.kind === 'node' && e.node_id === nodeId);
+  const nodeMapOf = (nodeId) => entries.find((e) => e.kind === 'mindmap' && e.node_id === nodeId);
+
+  async function genNodeNote(node, style) {
+    setBusy(`note-${node.id}`);
+    setMsg('');
+    try {
+      const r = await api.post(`/api/nodes/${node.id}/note`, { style });
+      setPicking(0);
+      if (r.note && r.note.id) setSavedEntry(`n${r.note.id}`);
+      setMsg(
+        r.created
+          ? `「${node.title}」的笔记文档已生成（${NOTE_STYLE_LABEL[style]}），已存入知识库。`
+          : r.appended
+            ? `「${node.title}」的笔记文档已按${NOTE_STYLE_LABEL[style]}增补，知识库已更新。`
+            : `「${node.title}」暂时没有新内容可补，笔记文档保持不变。`
+      );
+      loadEntries();
+    } catch (e) {
+      setMsg(e.message);
+    } finally {
+      setBusy('');
+    }
+  }
+  async function genNodeMap(node) {
+    setBusy(`map-${node.id}`);
+    setMsg('');
+    try {
+      const r = await api.post(`/api/nodes/${node.id}/mindmap`);
+      setOpenMap((m) => ({ ...m, [node.id]: r.content }));
+      if (r.entryId) setSavedEntry(r.entryId);
+      setMsg(`「${node.title}」的思维导图画好了，已存入知识库。`);
+      loadEntries();
+    } catch (e) {
+      setMsg(e.message);
+    } finally {
+      setBusy('');
+    }
+  }
+  async function viewNodeNote(entry) {
+    setMsg('');
+    try {
+      setOpenNote(await api.get(`/api/notes/${entry.noteId}`));
+    } catch (e) {
+      setMsg(e.message);
+    }
+  }
+  async function viewNodeMap(node) {
+    if (openMap[node.id]) {
+      setOpenMap((m) => ({ ...m, [node.id]: '' }));
+      return;
+    }
+    const entry = nodeMapOf(node.id);
+    if (!entry) return;
+    try {
+      const full = await api.get(`/api/notes/${entry.noteId}`);
+      setOpenMap((m) => ({ ...m, [node.id]: full.content }));
+    } catch (e) {
+      setMsg(e.message);
+    }
+  }
+
   if (!nodes.length) return <p className="muted">图谱还是空的：上课或导入知识点后，知识点会沉淀到这里。</p>;
   return (
     <div>
       <h3>知识点</h3>
-      <div className="node-wrap">
-        {nodes.map((n) => (
-          <span key={n.id} className={`node-chip st-${n.status}`}>
-            {n.title} <em>{STATUS_LABEL[n.status]}</em>
-            {n.source === 'import' && <em className="src-import">导入</em>}
-          </span>
-        ))}
-      </div>
+      <p className="muted">每个知识点都能单独让老师生成一份笔记文档（结合它在图谱里的位置和你的真实练习表现）和一张思维导图，都存进知识库。</p>
+      {msg && (
+        <div className="notice row">
+          <span>{msg}</span>
+          {savedEntry && onOpenNote && (
+            <button className="small" onClick={() => onOpenNote(savedEntry)}>
+              去知识库看 <Icon name="arrow-right" size={13} />
+            </button>
+          )}
+        </div>
+      )}
+      <ul className="plain-list node-list">
+        {nodes.map((n) => {
+          const note = nodeNoteOf(n.id);
+          const map = nodeMapOf(n.id);
+          return (
+            <li key={n.id} className="card node-row">
+              <div className="row-between">
+                <span className={`node-chip st-${n.status}`}>
+                  {n.title} <em>{STATUS_LABEL[n.status]}</em>
+                  {n.source === 'import' && <em className="src-import">导入</em>}
+                </span>
+                <span className="row">
+                  {picking === n.id ? (
+                    <>
+                      <span className="muted">{note ? '增补什么风格？' : '笔记风格？'}</span>
+                      <button className="small" disabled={busy !== ''} onClick={() => genNodeNote(n, 'easy')}>
+                        {busy === `note-${n.id}` ? '整理中…' : '易懂版'}
+                      </button>
+                      <button className="small" disabled={busy !== ''} onClick={() => genNodeNote(n, 'pro')}>
+                        {busy === `note-${n.id}` ? '整理中…' : '专业简洁版'}
+                      </button>
+                      <button className="small" disabled={busy !== ''} onClick={() => setPicking(0)}>
+                        取消
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      {note && (
+                        <button className="small" onClick={() => (openNote && openNote.id === note.noteId ? setOpenNote(null) : viewNodeNote(note))}>
+                          看笔记
+                        </button>
+                      )}
+                      <button className="small" disabled={busy !== ''} onClick={() => setPicking(n.id)}>
+                        <Icon name="sticky-note" size={14} /> {note ? '增补笔记' : '生成笔记'}
+                      </button>
+                      {map && (
+                        <button className="small" onClick={() => viewNodeMap(n)}>
+                          {openMap[n.id] ? '收起导图' : '看导图'}
+                        </button>
+                      )}
+                      <button className="small" disabled={busy !== ''} onClick={() => genNodeMap(n)}>
+                        <Icon name="network" size={14} /> {busy === `map-${n.id}` ? '正在画图…' : map ? '重画导图' : '思维导图'}
+                      </button>
+                    </>
+                  )}
+                </span>
+              </div>
+              {openNote && note && openNote.id === note.noteId && (
+                <div className="node-note-body">
+                  <Markdown text={openNote.content} />
+                </div>
+              )}
+              {openMap[n.id] && (
+                <div className="mindmap-card">
+                  <MindmapView data={openMap[n.id]} onRegenerate={() => genNodeMap(n)} />
+                </div>
+              )}
+            </li>
+          );
+        })}
+      </ul>
       <h3>推理关系</h3>
       {edges.length === 0 && <p className="muted">还没有推理关系。</p>}
       <ul className="edge-list">
@@ -1484,6 +1975,25 @@ function CardsTab({ subjectId, onJumpToStep }) {
 
   const dueCards = cards.filter((c) => new Date(c.due_at) <= new Date());
   const current = dueCards[Math.min(idx, Math.max(dueCards.length - 1, 0))];
+  const orphans = cards.filter((c) => !c.node_id); // 没挂上知识点的脱钩卡
+
+  async function repair() {
+    setBusy(true);
+    setMsg('');
+    try {
+      const r = await api.post(`/api/subjects/${subjectId}/cards/repair`);
+      setMsg(
+        r.total === 0
+          ? '没有脱钩的闪卡。'
+          : `修复完成：${r.repaired} 张重新挂回了知识点${r.remaining ? `，还有 ${r.remaining} 张实在对不上号（正反面里找不到知识点名），先留着` : ''}。`
+      );
+      load();
+    } catch (e) {
+      setMsg(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function generate() {
     setBusy(true);
@@ -1618,6 +2128,11 @@ function CardsTab({ subjectId, onJumpToStep }) {
         <button onClick={startSprint} disabled={cards.length === 0}>
           <Icon name="zap" size={15} /> 闪卡冲刺（全科 {cards.length} 张）
         </button>
+        {orphans.length > 0 && (
+          <button onClick={repair} disabled={busy}>
+            <Icon name="refresh-cw" size={15} /> 修复未挂载闪卡（{orphans.length} 张）
+          </button>
+        )}
         <span className="muted">共 {cards.length} 张，到期 {dueCards.length} 张</span>
       </div>
       {msg && <div className="notice">{msg}</div>}
@@ -1836,23 +2351,27 @@ function ImportTab({ subjectId, reload }) {
 }
 
 // ---------------- 课堂页 ----------------
+// 两层结构（与空间版一致）：有关卡的正课先进「关卡页」（只有真实进度 + 全部关卡，不混讲解内容），
+// 点当前关进该步的内容页（学完自动回关卡页），点已学完的关进只读回看，点未解锁的关原地给提示；
+// 练习与课堂小结的入口挂在关卡页上（学完所有步后出现）。
+// 摸底阶段、复习课没有关卡，走原来的单页内容形态。
 // E 关卡路径：8 步一循环的横向偏移（px）
 const PATH_OFFSETS = [0, 40, 80, 40, 0, -40, -80, -40];
 
+// 关卡状态只有三种真实状态：done（已学完）/ current（当前步）/ locked（还没解锁）。
+// 不再有「下一步画成蓝色播放键」的假解锁状态；进度一律按已学完步数算，不用阶段估算。
 function stepStateOf(data, steps) {
   return (i) => {
     if (!steps.length) return 'locked';
     if (data.phase === 'done' || data.phase === 'quiz') return 'done';
-    if (data.phase === 'probe') return i === 0 ? 'next' : 'locked';
-    // learning
+    if (data.phase !== 'learning') return i === 0 ? 'current' : 'locked';
     if (i < data.step_index) return 'done';
     if (i === data.step_index) return 'current';
-    if (i === data.step_index + 1) return 'next';
     return 'locked';
   };
 }
 
-function PathMap({ steps, stateOf }) {
+function PathMap({ steps, stateOf, onStep }) {
   return (
     <div className="path-map" aria-label="学习路线关卡">
       {steps.map((s, i) => {
@@ -1860,20 +2379,24 @@ function PathMap({ steps, stateOf }) {
         const dx = PATH_OFFSETS[i % 8];
         return (
           <div className="path-row" key={i}>
-            <div className={`path-node st-${st}`} style={{ transform: `translateX(${dx}px)` }}>
+            <button
+              type="button"
+              className={`path-node st-${st}`}
+              style={{ transform: `translateX(${dx}px)` }}
+              onClick={() => onStep(i, st)}
+              aria-label={`第 ${i + 1} 关：${s.title}${st === 'done' ? '（已学完，点开回看）' : st === 'current' ? '（当前关，点开继续学）' : '（还没解锁）'}`}
+            >
               {st === 'current' && <span className="path-bubble">开始</span>}
               <span className="path-icon">
                 {st === 'done' ? (
                   <Icon name="star" size={27} filled />
                 ) : st === 'current' ? (
                   <Icon name="play" size={25} filled />
-                ) : st === 'locked' ? (
-                  <Icon name="lock" size={23} />
                 ) : (
-                  i + 1
+                  <Icon name="lock" size={23} />
                 )}
               </span>
-            </div>
+            </button>
             <div className={`path-label st-${st}`} style={{ transform: `translateX(${dx}px)` }}>
               {s.title}
             </div>
@@ -1885,8 +2408,8 @@ function PathMap({ steps, stateOf }) {
 }
 
 // F 语雀的课堂路线：编号步骤列表（竖排、细线连接、文档目录式）。
-// 状态口径与 E 关卡路径完全一致（done/current/next/locked，由同一个 stateOf 给出），只是换语雀的呈现，不带任何游戏化元素。
-function StepList({ steps, stateOf }) {
+// 状态口径与 E 关卡路径完全一致（done/current/locked，由同一个 stateOf 给出），整行可点、行为与 E 相同，只是换语雀的呈现。
+function StepList({ steps, stateOf, onStep }) {
   return (
     <div className="step-list-wrap">
       <div className="step-list-head">
@@ -1897,14 +2420,18 @@ function StepList({ steps, stateOf }) {
         {steps.map((s, i) => {
           const st = stateOf(i);
           return (
-            <li className={`step-row st-${st}`} key={i}>
+            <li className={`step-row st-${st} clickable`} key={i} onClick={() => onStep(i, st)}>
               <span className="step-marker">
                 {st === 'done' ? <Icon name="check" size={13} /> : String(i + 1).padStart(2, '0')}
               </span>
               <span className="step-title">{s.title}</span>
               {st === 'current' && <span className="step-tag">当前</span>}
-              {st === 'done' && <span className="step-state muted">已完成</span>}
-              {st === 'locked' && <span className="step-state muted">未解锁</span>}
+              {st === 'done' && <span className="step-state muted">已完成 · 回看</span>}
+              {st === 'locked' && (
+                <span className="step-state muted">
+                  <Icon name="lock" size={12} /> 未解锁
+                </span>
+              )}
             </li>
           );
         })}
@@ -1913,12 +2440,15 @@ function StepList({ steps, stateOf }) {
   );
 }
 
-function SessionView({ sessionId, onBack, theme, focusStep }) {
+function SessionView({ sessionId, onBack, theme, focusStep, onOpenNote }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  // 两层结构里的当前页：map 关卡页 / step 某一步的内容页 / quiz 练习页 / summary 课堂小结页
+  const [page, setPage] = useState({ t: 'map' });
+  const [lockHint, setLockHint] = useState('');
   const bottomRef = React.useRef(null);
-  const focusedRef = React.useRef(false);
+  const focusAppliedRef = React.useRef(false);
 
   const load = useCallback(async () => {
     try {
@@ -1935,22 +2465,38 @@ function SessionView({ sessionId, onBack, theme, focusStep }) {
     stopSpeaking();
   }, [data && data.phase, data && data.step_index]);
   useEffect(() => () => stopSpeaking(), []);
+  // 换一节课时回到关卡页
   useEffect(() => {
-    if (focusStep !== undefined && focusStep !== null && !focusedRef.current) return; // 带定位进来时先别滚到底
-    if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior: 'smooth' });
-  }, [data, focusStep]);
-  // 从笔记库/冲刺跳回来时，定位到目标步的讲解处
+    setPage({ t: 'map' });
+    setLockHint('');
+    focusAppliedRef.current = false;
+  }, [sessionId]);
+  // 切页时回到顶部（关卡页和内容页都从头看）
   useEffect(() => {
-    if (focusStep === undefined || focusStep === null || !data || focusedRef.current) return;
-    const t = setTimeout(() => {
-      const el = document.querySelector(`[data-step-anchor="${focusStep}"]`);
-      if (el) {
-        focusedRef.current = true;
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
-    }, 200);
-    return () => clearTimeout(t);
-  }, [data, focusStep]);
+    window.scrollTo({ top: 0 });
+  }, [page]);
+
+  const steps0 = data && data.roadmap ? data.roadmap.steps : [];
+  const hasLevels = Boolean(data) && data.kind === 'lesson' && steps0.length > 0 && data.phase !== 'probe';
+
+  // 从知识库/冲刺跳回来时，直接打开那一步（已学完→回看，当前步→内容页；锁定步就留在关卡页）
+  useEffect(() => {
+    if (!data || focusAppliedRef.current) return;
+    if (focusStep === undefined || focusStep === null) {
+      focusAppliedRef.current = true;
+      return;
+    }
+    if (!hasLevels) return;
+    focusAppliedRef.current = true;
+    const i = Math.min(Math.max(focusStep, 0), steps0.length - 1);
+    if (stepStateOf(data, steps0)(i) !== 'locked') setPage({ t: 'step', i });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, focusStep, hasLevels]);
+
+  // 没有关卡的课堂（摸底中、复习课）保持原来的单页形态：新消息来了滚到底
+  useEffect(() => {
+    if (data && !hasLevels && bottomRef.current) bottomRef.current.scrollIntoView({ behavior: 'smooth' });
+  }, [data, hasLevels]);
 
   if (error) return <div className="notice warn">{error}</div>;
   if (!data) return <p className="muted">正在加载…</p>;
@@ -1960,13 +2506,22 @@ function SessionView({ sessionId, onBack, theme, focusStep }) {
   const probeMsg = messages.find((m) => m.type === 'probe');
   const quizMsg = [...messages].reverse().find((m) => m.type === 'quiz');
   const gradingMsg = [...messages].reverse().find((m) => m.type === 'grading');
-  const steps = data.roadmap ? data.roadmap.steps : [];
+  const steps = steps0;
   const currentStepTaught = messages.some(
     (m) => m.type === 'teach' && m.meta && m.meta.stepIndex === data.step_index
   );
   const stateOf = stepStateOf(data, steps);
   const doneCount = steps.filter((_, i) => stateOf(i) === 'done').length;
   const progressPct = steps.length ? Math.round((doneCount / steps.length) * 100) : 0;
+
+  // 把消息流按步切段：一段从该步的 predict_prompt 开始，到下一步的 predict_prompt 之前；
+  // 旁问这类没有步号的消息，按出现位置归到当时的那一步。
+  let segCursor = -1;
+  const segOf = messages.map((m) => {
+    if (m.type === 'predict_prompt' && m.meta && typeof m.meta.stepIndex === 'number') segCursor = m.meta.stepIndex;
+    return segCursor;
+  });
+  const stepMessages = (i) => messages.filter((_, idx) => segOf[idx] === i);
 
   async function act(fn) {
     setBusy(true);
@@ -1980,68 +2535,279 @@ function SessionView({ sessionId, onBack, theme, focusStep }) {
     }
   }
 
+  function goMap() {
+    setLockHint('');
+    setPage({ t: 'map' });
+  }
+
+  // 点关卡：已学完→回看、当前关→内容页、未解锁→原地给白话提示（先学完哪一步、这步要先有什么基础）
+  function handleStep(i, st) {
+    if (st === 'done' || st === 'current') {
+      setLockHint('');
+      setPage({ t: 'step', i });
+      return;
+    }
+    const cur = data.step_index;
+    const curStep = steps[cur];
+    const target = steps[i];
+    setLockHint(
+      `第 ${i + 1} 步「${target.title}」还没解锁：先学完第 ${cur + 1} 步${curStep ? `「${curStep.title}」` : ''}。` +
+        `这一步讲的是${target.summary ? `「${target.summary}」` : '后面的内容'}，是建立在前面几步之上的——前面的关学完，这一关自然就开了。`
+    );
+  }
+
+  // 学完当前步：推进成功后回到关卡页（下一步在关卡页点进去；最后一步推进后关卡页会出现练习入口）
+  async function finishStep() {
+    let ok = false;
+    await act(async () => {
+      setData(await api.post(`/api/sessions/${sessionId}/next`, {}));
+      ok = true;
+    });
+    if (ok) goMap();
+  }
+
+  // 渲染一串消息；teach 下面挂这一步的工具（笔记/思维导图）和理解自评（回看时只展示当时的自评，不给改）
+  function renderMessages(list, readOnly) {
+    return list.map((m) => {
+      if (m.type === 'teach' && m.meta && typeof m.meta.stepIndex === 'number') {
+        const si = m.meta.stepIndex;
+        const mark = (data.stepMarks && data.stepMarks[si]) || '';
+        const markLabel = (MARK_OPTIONS.find(([v]) => v === mark) || [])[1];
+        return (
+          <div key={m.id}>
+            <Message m={m} quizMsg={quizMsg} />
+            <StepTools
+              sessionId={sessionId}
+              stepIndex={si}
+              hasNote={Boolean(data.stepNotes && data.stepNotes[si])}
+              mindmap={(data.stepMindmaps && data.stepMindmaps[si]) || ''}
+              onChanged={load}
+              onOpenNote={onOpenNote}
+            />
+            {readOnly ? (
+              mark ? (
+                <div className="step-mark">
+                  <span className="muted">当时你的自评：</span>
+                  <span className="badge">{markLabel || mark}</span>
+                </div>
+              ) : null
+            ) : (
+              <StepMark sessionId={sessionId} stepIndex={si} mark={mark} onChanged={load} />
+            )}
+          </div>
+        );
+      }
+      return <Message key={m.id} m={m} quizMsg={quizMsg} />;
+    });
+  }
+
+  const headRow = (
+    <div className="row-between sticky-head">
+      <button className="small" onClick={onBack}>
+        <Icon name="arrow-left" size={15} /> 返回科目
+      </button>
+      <span className="muted">
+        <Icon name={data.kind === 'review' ? 'calendar' : 'book-open'} size={15} /> {data.kind === 'review' ? '复习课' : '课堂'} · {PHASE_LABEL[data.phase] || data.phase}
+        {data.roadmap ? ` · 第 ${Math.min(data.step_index + 1, data.roadmap.steps.length)}/${data.roadmap.steps.length} 步` : ''}
+        {data.material_name ? ` · 资料：${data.material_name}` : ''}
+      </span>
+    </div>
+  );
+
+  // 关卡页头部的进度区：E 是粗进度条 + 蜿蜒关卡路径；F 是细进度线 + 编号步骤列表。
+  // 百分比只按已学完步数算（doneCount/总步数），两套皮肤同一口径。
+  const progressBlock = steps.length > 0 && (
+    theme === 'f' ? (
+      <div>
+        <div className="step-progress">
+          <div className="kb-progress" role="progressbar" aria-valuenow={progressPct} aria-valuemin="0" aria-valuemax="100">
+            <div className="kb-progress-fill" style={{ width: `${progressPct}%` }} />
+          </div>
+          <span className="muted">
+            已学完 {doneCount} / {steps.length} 步 · {progressPct}%
+          </span>
+        </div>
+        <StepList steps={steps} stateOf={stateOf} onStep={handleStep} />
+      </div>
+    ) : (
+      <div>
+        <div className="session-progress-row">
+          <div className="big-progress grow">
+            <div className="big-progress-fill" style={{ width: `${progressPct}%` }} />
+          </div>
+          <span className="muted">
+            已学完 {doneCount} / {steps.length} 步 · {progressPct}%
+          </span>
+        </div>
+        <PathMap steps={steps} stateOf={stateOf} onStep={handleStep} />
+      </div>
+    )
+  );
+
+  // ---------- 关卡页：只有进度 + 全部关卡（+ 学完所有步后的练习/小结入口），不混讲解内容 ----------
+  if (hasLevels && page.t === 'map') {
+    return (
+      <div className="session-layout">
+        <div className="session-main">
+          {headRow}
+          {error && <div className="notice warn">{error}</div>}
+          {progressBlock}
+          {lockHint && <div className="notice warn">{lockHint}</div>}
+          {data.phase === 'quiz' && (
+            <div className="card row-between">
+              <span>
+                <b>练习检验</b> <span className="muted">步子都学完了，来做几道换了新场景的题，看看是不是真会了。</span>
+              </span>
+              <button className="primary" onClick={() => setPage({ t: 'quiz' })}>
+                进入练习 <Icon name="arrow-right" size={16} />
+              </button>
+            </div>
+          )}
+          {data.phase === 'done' && (
+            <div className="card row-between">
+              <span>
+                <b>课堂小结</b> <span className="muted">这节课的练习批改结果都在小结里。</span>
+              </span>
+              <button className="primary" onClick={() => setPage({ t: 'summary' })}>
+                查看课堂小结 <Icon name="arrow-right" size={16} />
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ---------- 关内页：只显示这一步的内容；已学完的步是只读回看 ----------
+  if (hasLevels && page.t === 'step') {
+    const i = Math.min(Math.max(page.i, 0), steps.length - 1);
+    const readOnly = stateOf(i) === 'done';
+    const isCurrent = data.phase === 'learning' && i === data.step_index;
+    const list = stepMessages(i);
+    const hasPrediction = list.some((m) => m.type === 'prediction');
+    return (
+      <div className="session-layout">
+        <div className="session-main">
+          <div className="row-between sticky-head">
+            <button className="small" onClick={goMap}>
+              <Icon name="arrow-left" size={15} /> 返回关卡
+            </button>
+            <span className="muted">
+              第 {i + 1} 步 / 共 {steps.length} 步{readOnly ? ' · 回看' : ''}
+            </span>
+          </div>
+          {error && <div className="notice warn">{error}</div>}
+          <h3>
+            第 {i + 1} 步 · {steps[i].title}
+          </h3>
+          <div className="transcript">{renderMessages(list, readOnly)}</div>
+          {isCurrent && !currentStepTaught && !hasPrediction && (
+            <PredictionForm
+              sessionId={sessionId}
+              stepIndex={i}
+              busy={busy}
+              onSubmit={(text) => act(async () => setData(await api.post(`/api/sessions/${sessionId}/predict`, { text })))}
+            />
+          )}
+          {isCurrent && currentStepTaught && (
+            <div className="card row">
+              <button className="primary" disabled={busy} onClick={finishStep}>
+                {busy ? (
+                  '请稍等…'
+                ) : i + 1 < steps.length ? (
+                  <>
+                    学完这一步，回到关卡 <Icon name="arrow-right" size={16} />
+                  </>
+                ) : (
+                  <>
+                    学完这一步，去做练习 <Icon name="arrow-right" size={16} />
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+          {isCurrent && currentStepTaught && (
+            <FeynmanBox
+              sessionId={sessionId}
+              stepIndex={i}
+              stepTitle={steps[i] ? steps[i].title : ''}
+              passed={Boolean(data.feynman && data.feynman[i] && data.feynman[i].passed)}
+              busy={busy}
+              onSubmit={(text) =>
+                act(async () => setData(await api.post(`/api/sessions/${sessionId}/feynman`, { text, stepIndex: i })))
+              }
+            />
+          )}
+          {isCurrent && <AsideBox sessionId={sessionId} onDone={load} />}
+        </div>
+      </div>
+    );
+  }
+
+  // ---------- 练习页：学完所有步后从关卡页进来，形态与原来的练习一致 ----------
+  if (hasLevels && page.t === 'quiz') {
+    const list = messages.filter((m) => ['quiz', 'quiz_answer', 'grading', 'aside_q', 'aside_a'].includes(m.type));
+    return (
+      <div className="session-layout">
+        <div className="session-main">
+          <div className="row-between sticky-head">
+            <button className="small" onClick={goMap}>
+              <Icon name="arrow-left" size={15} /> 返回关卡
+            </button>
+            <span className="muted">练习检验</span>
+          </div>
+          {error && <div className="notice warn">{error}</div>}
+          <div className="transcript">{renderMessages(list, true)}</div>
+          {data.phase === 'quiz' && quizMsg && (
+            <QuizForm
+              sessionId={sessionId}
+              questions={quizMsg.meta.questions}
+              busy={busy}
+              onSubmit={(answers) =>
+                act(async () => {
+                  setData(await api.post(`/api/sessions/${sessionId}/quiz`, { answers }));
+                  setPage({ t: 'summary' });
+                })
+              }
+            />
+          )}
+          <AsideBox sessionId={sessionId} onDone={load} />
+        </div>
+      </div>
+    );
+  }
+
+  // ---------- 课堂小结页：从关卡页进来，只看这节课的练习与批改 ----------
+  if (hasLevels && page.t === 'summary') {
+    const list = messages.filter((m) => ['quiz', 'quiz_answer', 'grading'].includes(m.type));
+    return (
+      <div className="session-layout">
+        <div className="session-main">
+          <div className="row-between sticky-head">
+            <button className="small" onClick={goMap}>
+              <Icon name="arrow-left" size={15} /> 返回关卡
+            </button>
+            <span className="muted">课堂小结</span>
+          </div>
+          {error && <div className="notice warn">{error}</div>}
+          <div className="transcript">{renderMessages(list, true)}</div>
+          {gradingMsg && (
+            <div className="notice">这节课完成了。回科目页可以看图谱变化、生成闪卡，或等知识点到期后在「复习」页签里复习。</div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ---------- 没有关卡的课堂（摸底中、复习课）：原来的单页形态 ----------
   return (
     <div className="session-layout">
       <div className="session-main">
-      <div className="row-between sticky-head">
-        <button className="small" onClick={onBack}>
-          <Icon name="arrow-left" size={15} /> 返回科目
-        </button>
-        <span className="muted">
-          <Icon name={data.kind === 'review' ? 'calendar' : 'book-open'} size={15} /> {data.kind === 'review' ? '复习课' : '课堂'} · {PHASE_LABEL[data.phase] || data.phase}
-          {data.roadmap ? ` · 第 ${Math.min(data.step_index + 1, data.roadmap.steps.length)}/${data.roadmap.steps.length} 步` : ''}
-          {data.material_name ? ` · 资料：${data.material_name}` : ''}
-        </span>
-      </div>
+      {headRow}
       {error && <div className="notice warn">{error}</div>}
 
-      {/* 路线区：E 是粗进度条 + 蜿蜒关卡路径；F 是细进度线 + 编号步骤列表（同为单栏、同一位置、同一状态口径） */}
-      {steps.length > 0 &&
-        (theme === 'f' ? (
-          <div>
-            <div className="step-progress">
-              <div className="kb-progress" role="progressbar" aria-valuenow={progressPct} aria-valuemin="0" aria-valuemax="100">
-                <div className="kb-progress-fill" style={{ width: `${progressPct}%` }} />
-              </div>
-              <span className="muted">
-                第 {Math.min(data.step_index + 1, steps.length)} / {steps.length} 步
-              </span>
-            </div>
-            <StepList steps={steps} stateOf={stateOf} />
-          </div>
-        ) : (
-          <div>
-            <div className="session-progress-row">
-              <div className="big-progress grow">
-                <div className="big-progress-fill" style={{ width: `${progressPct}%` }} />
-              </div>
-              <span className="muted">
-                第 {Math.min(data.step_index + 1, steps.length)} / {steps.length} 步
-              </span>
-            </div>
-            <PathMap steps={steps} stateOf={stateOf} />
-          </div>
-        ))}
-
       <div className="transcript">
-        {messages.map((m) => {
-          if (m.type === 'teach' && m.meta && typeof m.meta.stepIndex === 'number') {
-            const si = m.meta.stepIndex;
-            return (
-              <div key={m.id} data-step-anchor={si}>
-                <Message m={m} quizMsg={quizMsg} />
-                <StepTools
-                  sessionId={sessionId}
-                  stepIndex={si}
-                  hasNote={Boolean(data.stepNotes && data.stepNotes[si])}
-                  mindmap={(data.stepMindmaps && data.stepMindmaps[si]) || ''}
-                  onChanged={load}
-                />
-              </div>
-            );
-          }
-          return <Message key={m.id} m={m} quizMsg={quizMsg} />;
-        })}
+        {renderMessages(messages, false)}
         <div ref={bottomRef} />
       </div>
 
@@ -2051,46 +2817,6 @@ function SessionView({ sessionId, onBack, theme, focusStep }) {
           questions={probeMsg.meta.questions}
           busy={busy}
           onSubmit={(answers) => act(async () => setData(await api.post(`/api/sessions/${sessionId}/probe`, { answers })))}
-        />
-      )}
-      {data.phase === 'learning' && last && last.type === 'predict_prompt' && (
-        <PredictionForm
-          sessionId={sessionId}
-          stepIndex={data.step_index}
-          busy={busy}
-          onSubmit={(text) => act(async () => setData(await api.post(`/api/sessions/${sessionId}/predict`, { text })))}
-        />
-      )}
-      {data.phase === 'learning' && currentStepTaught && !(last && last.type === 'predict_prompt') && (
-        <div className="card row">
-          <button
-            className="primary"
-            disabled={busy}
-            onClick={() => act(async () => setData(await api.post(`/api/sessions/${sessionId}/next`, {})))}
-          >
-            {busy ? (
-              '请稍等…'
-            ) : data.roadmap && data.step_index + 1 < data.roadmap.steps.length ? (
-              <>
-                下一步 <Icon name="arrow-right" size={16} />
-              </>
-            ) : (
-              <>
-                讲完了，去做练习 <Icon name="arrow-right" size={16} />
-              </>
-            )}
-          </button>
-        </div>
-      )}
-      {data.phase === 'learning' && currentStepTaught && (
-        <FeynmanBox
-          sessionId={sessionId}
-          stepIndex={data.step_index}
-          stepTitle={steps[data.step_index] ? steps[data.step_index].title : ''}
-          busy={busy}
-          onSubmit={(text) =>
-            act(async () => setData(await api.post(`/api/sessions/${sessionId}/feynman`, { text, stepIndex: data.step_index })))
-          }
         />
       )}
       {data.phase === 'quiz' && quizMsg && (
@@ -2112,10 +2838,12 @@ function SessionView({ sessionId, onBack, theme, focusStep }) {
 }
 
 // 每步讲解下方的工具行：生成笔记（主动点才生成，先选风格；同一步再点是按这次的风格追加增补）+ 思维导图。
-function StepTools({ sessionId, stepIndex, hasNote, mindmap, onChanged }) {
+// 生成的都是「文档」：存进这个科目的知识库，生成完明确告诉你存好了，并能一键跳过去看。
+function StepTools({ sessionId, stepIndex, hasNote, mindmap, onChanged, onOpenNote }) {
   const [busy, setBusy] = useState('');
   const [msg, setMsg] = useState('');
   const [picking, setPicking] = useState(false); // 正在选笔记风格
+  const [savedEntry, setSavedEntry] = useState(''); // 刚存进知识库的那份文档的 entryId
 
   async function genNote(style) {
     setBusy('note');
@@ -2123,12 +2851,13 @@ function StepTools({ sessionId, stepIndex, hasNote, mindmap, onChanged }) {
     try {
       const r = await api.post(`/api/sessions/${sessionId}/steps/${stepIndex}/note`, { style });
       setPicking(false);
+      if (r.note && r.note.id) setSavedEntry(`n${r.note.id}`);
       setMsg(
         r.created
-          ? `笔记已生成（${style === 'pro' ? '专业简洁版' : '易懂版'}），存进这个科目的「笔记库」了。`
+          ? `老师把这一步整理成笔记文档了（${style === 'pro' ? '专业简洁版' : '易懂版'}），已存入知识库。`
           : r.appended
-            ? `新内容已按${style === 'pro' ? '专业简洁版' : '易懂版'}追加到这一步原来的笔记后面。`
-            : '这次讲解没有新内容，笔记保持不变。'
+            ? `新内容已按${style === 'pro' ? '专业简洁版' : '易懂版'}追加到这一步的笔记文档后面，知识库已更新。`
+            : '这次讲解没有新内容，笔记文档保持不变。'
       );
       onChanged();
     } catch (e) {
@@ -2141,8 +2870,9 @@ function StepTools({ sessionId, stepIndex, hasNote, mindmap, onChanged }) {
     setBusy('mindmap');
     setMsg('');
     try {
-      await api.post(`/api/sessions/${sessionId}/steps/${stepIndex}/mindmap`);
-      setMsg('思维导图画好了，就在下面。');
+      const r = await api.post(`/api/sessions/${sessionId}/steps/${stepIndex}/mindmap`);
+      if (r.mindmapId) setSavedEntry(`sm${r.mindmapId}`);
+      setMsg('思维导图画好了，已存入知识库（下面也能直接看）。');
       onChanged();
     } catch (e) {
       setMsg(e.message);
@@ -2150,6 +2880,12 @@ function StepTools({ sessionId, stepIndex, hasNote, mindmap, onChanged }) {
       setBusy('');
     }
   }
+
+  const savedLink = savedEntry && onOpenNote && (
+    <button className="small" onClick={() => onOpenNote(savedEntry)}>
+      去知识库看 <Icon name="arrow-right" size={13} />
+    </button>
+  );
 
   return (
     <div className="step-tools">
@@ -2173,6 +2909,7 @@ function StepTools({ sessionId, stepIndex, hasNote, mindmap, onChanged }) {
             先不生成
           </button>
           {msg && <span className="muted">{msg}</span>}
+          {savedLink}
         </div>
       ) : (
         <div className="row">
@@ -2183,6 +2920,7 @@ function StepTools({ sessionId, stepIndex, hasNote, mindmap, onChanged }) {
             <Icon name="network" size={14} /> {busy === 'mindmap' ? '正在画图…' : mindmap ? '重画思维导图' : '思维导图'}
           </button>
           {msg && <span className="muted">{msg}</span>}
+          {savedLink}
         </div>
       )}
       {mindmap && (
@@ -2194,16 +2932,68 @@ function StepTools({ sessionId, stepIndex, hasNote, mindmap, onChanged }) {
   );
 }
 
-// 费曼检验：把这一步用自己的话讲给老师听，老师点评对/漏/错并追问；可以接着答下一轮。
-function FeynmanBox({ sessionId, stepIndex, stepTitle, busy, onSubmit }) {
+// 理解自评：每步讲解后三档自评（自己能懂 / 靠讲解才懂 / 还是不懂）。
+// 标「还是不懂」服务端会自动生成一段前置概念补讲存进消息流；另两档只记录不打扰。
+const MARK_OPTIONS = [
+  ['self', '自己能懂'],
+  ['helped', '靠帮助才懂'],
+  ['stuck', '还是不懂'],
+];
+function StepMark({ sessionId, stepIndex, mark, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  async function choose(mk) {
+    if (busy || mk === mark) return;
+    setBusy(true);
+    setMsg('');
+    try {
+      const r = await api.post(`/api/sessions/${sessionId}/steps/${stepIndex}/mark`, { mark: mk });
+      if (mk === 'stuck') {
+        setMsg(r.reteach ? '老师给你补了一段前置概念，就在下面，慢慢看。' : '记下了。');
+      }
+      onChanged();
+    } catch (e) {
+      setMsg(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="step-mark">
+      <span className="muted">这一步你懂到什么程度？</span>
+      {MARK_OPTIONS.map(([v, label]) => (
+        <button
+          key={v}
+          type="button"
+          className={'small mark-btn' + (mark === v ? ` active mark-${v}` : '')}
+          disabled={busy}
+          onClick={() => choose(v)}
+        >
+          {mark === v && <Icon name="check" size={13} />} {label}
+        </button>
+      ))}
+      {busy && <span className="muted">老师正在准备补讲…</span>}
+      {msg && <span className="muted">{msg}</span>}
+    </div>
+  );
+}
+
+// 费曼检验：把这一步用自己的话讲给老师听，老师点评对/漏/错并追问；讲清了这一步会打上通过标记。
+function FeynmanBox({ sessionId, stepIndex, stepTitle, busy, onSubmit, passed }) {
   const [text, setText] = useLocalState(`feynman-${sessionId}-${stepIndex}`, '');
   return (
     <div className="card feynman-box">
       <h3>
         <Icon name="message-circle" size={19} /> 讲给我听（检验是不是真懂了）
+        {passed && (
+          <span className="badge pass-badge">
+            <Icon name="check-circle" size={14} /> 已通过 · 你讲清了
+          </span>
+        )}
       </h3>
       <p className="muted">
-        用自己的话把「{stepTitle}」讲一遍，别照抄讲解。老师会指出你讲对的、漏掉的、糊弄过去的地方，再追问一个问题。不打分，不影响进度。
+        用自己的话把「{stepTitle}」讲一遍，别照抄讲解。老师会指出你讲对的、漏掉的、糊弄过去的地方；
+        {passed ? '这一步你已经讲清了，想再练一轮也可以。' : '没讲清会追问你，再答一轮；讲清了这一步就会标上「已通过」。不影响进度。'}
       </p>
       <SpeechTextarea value={text} onChange={setText} rows={3} placeholder="比如：这一步其实就是在说……（可以语音输入）" />
       <button
@@ -2279,6 +3069,16 @@ function Message({ m, quizMsg }) {
         {m.type === 'feynman_feedback' && (
           <div className="msg-tag">
             <Icon name="message-circle" size={13} /> 讲给我听 · 老师点评
+            {m.meta && m.meta.passed && (
+              <span className="badge pass-badge">
+                <Icon name="check-circle" size={12} /> 讲清了 · 已通过
+              </span>
+            )}
+          </div>
+        )}
+        {m.type === 'reteach' && (
+          <div className="msg-tag">
+            <Icon name="book-open" size={13} /> 补讲 · 前置概念（你标了「还是不懂」，先把地基补上）
           </div>
         )}
         {isUser ? <div className="pre-wrap">{m.content}</div> : <Markdown text={m.content} />}

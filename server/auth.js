@@ -1,6 +1,7 @@
 // 账号：注册 / 登录 / 会话。密码用 Node 自带 crypto 的 scrypt 加盐哈希，不引新依赖、不存明文。
 // 会话是随机令牌 + httpOnly cookie + 服务端 auth_sessions 表（可过期、可吊销）。
-// 过渡口径：库里还没有任何用户时，应用照常可用（待认领状态）；第一个注册的用户认领全部无主科目。
+// 登录墙口径：必须注册登录才能进入——除注册/登录/我是谁之外，所有数据接口一律要求有效会话，
+// 包括库里还没有任何账号的初始状态（初始状态只许注册第一个账号）；第一个注册的用户认领全部无主科目。
 const crypto = require('crypto');
 const { db, now } = require('./db');
 
@@ -86,9 +87,9 @@ function attachUser(req, res, next) {
   next();
 }
 
-// 中间件：数据接口的门禁。还没人注册（待认领）时放行；一旦有用户，未登录一律 401。
+// 中间件：数据接口的门禁。一律要求有效会话，未登录 401——空库初始状态也不例外（只放行注册/登录本身）。
 function requireAuth(req, res, next) {
-  if (!req.hasUsers || req.user) return next();
+  if (req.user) return next();
   return res.status(401).json({ error: '请先登录。' });
 }
 

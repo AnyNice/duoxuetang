@@ -365,6 +365,10 @@ h1 .icon, h3 .icon { vertical-align: -2px; }
 @keyframes ring-pulse { 0% { transform: scale(0.92); opacity: 0.9; } 70% { transform: scale(1.08); opacity: 0.25; } 100% { transform: scale(1.12); opacity: 0; } }
 .path-node.st-next { background: var(--blue); box-shadow: 0 6px 0 var(--blue-dark); }
 .path-node.st-locked { background: var(--border); box-shadow: 0 6px 0 #cfcfcf; color: #afafaf; }
+/* 关卡节点是真按钮（点进关内页/回看/给提示）：去掉全局 button 的边框与内边距，底色和阴影由 .st-* 状态规则给；
+   位移走 inline transform，全局 button:active 的 translateY 压不过它，按下时节点不会横跳 */
+button.path-node { border: none; padding: 0; cursor: pointer; }
+button.path-node:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
 .path-bubble {
   position: absolute; top: -38px; left: 50%; transform: translateX(-50%);
   background: #fff; border: 2px solid var(--border); color: var(--accent);
@@ -414,6 +418,11 @@ h1 .icon, h3 .icon { vertical-align: -2px; }
 .step-row.st-locked .step-marker { color: #bfbfbf; }
 .step-tag { font-size: 12px; background: var(--accent); color: #fff; border-radius: 4px; padding: 0 7px; line-height: 20px; }
 .step-state { font-size: 12.5px; margin-left: auto; }
+/* F 的步骤行同样可点（进关内页/回看/给提示），行为与 E 关卡节点一致 */
+.step-row.clickable { cursor: pointer; }
+.step-row.clickable:hover { background: var(--side); }
+.step-row.st-current.clickable:hover { background: var(--accent-soft); }
+.step-row .step-state .icon { vertical-align: -2px; }
 
 /* ---------- 文件浏览器 ---------- */
 .files-list { list-style: none; padding: 0; margin: 8px 0; }
@@ -496,8 +505,33 @@ h1 .icon, h3 .icon { vertical-align: -2px; }
 }
 .avatar-circle img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .avatar-name { font-weight: 700; color: var(--ink-strong); }
-.auth-wrap { max-width: 430px; margin: 26px auto 0; }
-.auth-submit { width: 100%; margin-top: 6px; }
+/* 登录页（无边框极简版）：未登录时顶栏不渲染，页面只有一列——居中品牌区（大 logo + 产品名
+   + 标语），下面直接两个输入框 + 一个主按钮，没有卡片、没有边框、没有阴影。
+   输入框只靠极淡的底色块区分，聚焦时底部给一条主色提示线；登录/注册靠主按钮下方一行
+   小字文字链切换。两套皮肤共用结构，只差主色与圆角气质。 */
+.auth-wrap { max-width: 400px; margin: 0 auto; padding-top: 48px; }
+.auth-brand { text-align: center; margin-bottom: 26px; }
+.auth-logo { display: block; width: 104px; height: 104px; object-fit: cover; margin: 0 auto; }
+[data-theme='e'] .auth-logo { border-radius: 26px; box-shadow: 0 5px 0 var(--accent-dark); }
+[data-theme='f'] .auth-logo { border-radius: 10px; }
+.auth-title { font-size: 30px; margin: 14px 0 2px; }
+.auth-tagline { margin: 0; color: var(--muted); font-size: 15px; }
+.auth-form { padding: 0 6px; }
+.auth-form label { margin: 16px 0; }
+.auth-form input {
+  border: none;
+  background: var(--side);
+  padding: 13px 14px;
+  font-size: 16px;
+}
+.auth-wrap .auth-form input:focus { outline: none; box-shadow: inset 0 -2px 0 var(--focus); }
+.auth-submit { width: 100%; margin-top: 10px; }
+.auth-switch-line { text-align: center; margin: 18px 0 0; color: var(--muted); font-size: 14px; }
+.auth-link { border: none; background: none; padding: 0 2px; color: var(--accent-dark); font-weight: 700; font-size: 14px; cursor: pointer; }
+[data-theme='e'] .auth-link, [data-theme='f'] .auth-link { box-shadow: none; }
+[data-theme='e'] .auth-link:active:not(:disabled), [data-theme='f'] .auth-link:active:not(:disabled) { transform: none; box-shadow: none; }
+.auth-link:hover:not(:disabled) { border: none; color: var(--accent-dark); text-decoration: underline; }
+.auth-privacy { text-align: center; font-size: 12.5px; margin-top: 10px; }
 .profile-layout { display: flex; gap: 24px; align-items: flex-start; }
 .profile-side { width: 228px; flex: none; position: sticky; top: calc(var(--topbar-h) + 14px); }
 .profile-avatar {
@@ -564,7 +598,37 @@ h1 .icon, h3 .icon { vertical-align: -2px; }
   .topbar { padding: 8px 12px; }
   .brand-name .muted { display: none; }
   .avatar-name { display: none; }
+  .auth-wrap { padding-top: 32px; }
+  .auth-logo { width: 88px; height: 88px; }
+  [data-theme='e'] .auth-logo { border-radius: 22px; }
+  [data-theme='f'] .auth-logo { border-radius: 8px; }
+  .auth-title { font-size: 27px; }
 }
+
+/* ---------- 理解自评（课堂每步） ---------- */
+.step-mark { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 2px 0 14px 6px; }
+.step-mark .mark-btn.active { background: var(--accent); color: #fff; font-weight: 700; }
+.step-mark .mark-btn.active:hover:not(:disabled) { color: #fff; }
+[data-theme='e'] .step-mark .mark-btn.mark-stuck.active { background: var(--yellow); color: #664d00; }
+[data-theme='e'] .step-mark .mark-btn.mark-stuck.active:hover:not(:disabled) { color: #664d00; }
+.pass-badge { display: inline-flex; align-items: center; gap: 4px; background: var(--accent-soft); color: var(--accent-dark); font-weight: 700; }
+.msg-tag .pass-badge { margin-left: 6px; }
+
+/* ---------- 图谱知识点行 / 知识库 ---------- */
+.node-list { display: flex; flex-direction: column; gap: 8px; }
+.node-row { margin: 0; }
+.node-note-body { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; }
+.lib-filters { margin-bottom: 10px; }
+
+/* ---------- 设置：音色试听行 ---------- */
+.model-picker .voice-option { display: flex; align-items: center; gap: 6px; padding-right: 8px; }
+.model-picker .voice-option .voice-main {
+  flex: 1; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  background: transparent; border: none; box-shadow: none; padding: 0; min-height: 0;
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.model-picker .voice-option .voice-main:hover:not(:disabled) { color: var(--ink-strong); border: none; }
+.voice-preview-btn { flex: none; }
 
 /* ---------- 减少动态偏好：关掉弹跳/脉冲 ---------- */
 @media (prefers-reduced-motion: reduce) {

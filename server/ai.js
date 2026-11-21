@@ -171,14 +171,23 @@ async function generateCards(subject, nodeTitles) {
 
 // ---------- 快速学习套件 ----------
 
+// 三件套（总览/术语表/速查表）与笔记共用同一套风格口径：easy 易懂 / pro 专业简洁。
+const DOC_STYLE_RULES = {
+  easy: '风格是「易懂版」：大白话为主，关键处带一个生活化的小例子或比方，讲细一点；必须用术语时当场用一句白话解释。',
+  pro: '风格是「专业简洁版」：术语准确、结论先行、只留干货，能压缩成短条目就不要写整句，不解释基础概念、不打比方、不说客套话。',
+};
+function docStyleRule(style) {
+  return style === 'pro' ? DOC_STYLE_RULES.pro : DOC_STYLE_RULES.easy;
+}
+
 // 速成模式的「一页纸总览」：先搭骨架——核心概念、彼此关系、最要紧的 20%。
-async function buildOverview(subject) {
+async function buildOverview(subject, style) {
   return chat(
     [
       { role: 'system', content: TEACHER },
       {
         role: 'user',
-        content: `${subjectCtx(subject)}\n\n学生要用速成的方式学这门科目，时间很紧。请给他一页纸总览，先把骨架搭起来。Markdown 格式，800 字以内，结构固定为三节：\n## 核心概念\n列出 8~12 个最核心的概念，每个一行：**概念名**——一句人话解释。\n## 它们之间的关系\n用几句话讲清主线：先有什么、再有什么、谁依赖谁，像一张地图的文字版。\n## 最要紧的 20%\n从核心概念里挑出 2~3 个「核心中的核心」，逐个说明为什么它最要紧、学它的时候要抓什么。`,
+        content: `${subjectCtx(subject)}\n\n学生要用速成的方式学这门科目，时间很紧。请给他一页纸总览，先把骨架搭起来。Markdown 格式，800 字以内，结构固定为三节：\n## 核心概念\n列出 8~12 个最核心的概念，每个一行：**概念名**——一句人话解释。\n## 它们之间的关系\n用几句话讲清主线：先有什么、再有什么、谁依赖谁，像一张地图的文字版。\n## 最要紧的 20%\n从核心概念里挑出 2~3 个「核心中的核心」，逐个说明为什么它最要紧、学它的时候要抓什么。\n${docStyleRule(style)}`,
       },
     ],
     { temperature: 0.7 }
@@ -186,10 +195,14 @@ async function buildOverview(subject) {
 }
 
 // 术语先行：这科的关键词清单，每个一句人话解释。
-async function generateTerms(subject) {
+async function generateTerms(subject, style) {
+  const explainRule =
+    style === 'pro'
+      ? '每个配一句专业简洁的解释（术语准确、只给定义和关键区别，不打比方）'
+      : '每个配一句人话解释（不懂这行的人也能看懂，必要时打个小比方）';
   const out = await chatJSON(
     TEACHER,
-    `${subjectCtx(subject)}\n\n请列出这门科目最要紧的 10~20 个关键词（术语），每个配一句人话解释（不懂这行的人也能看懂，必要时打个小比方）。按重要程度从高到低排。\n输出格式：{"terms":[{"term":"术语","explain":"一句人话解释"}]}`
+    `${subjectCtx(subject)}\n\n请列出这门科目最要紧的 10~20 个关键词（术语），${explainRule}。按重要程度从高到低排。\n输出格式：{"terms":[{"term":"术语","explain":"一句解释"}]}`
   );
   const terms = Array.isArray(out.terms) ? out.terms : [];
   if (!terms.length) throw new Error('术语表生成失败，请重试。');
@@ -199,32 +212,60 @@ async function generateTerms(subject) {
 }
 
 // 速查表：一页纸总结（核心概念、关系、易错点），给考前/用前快速扫一眼。
-async function generateCheatsheet(subject, nodeTitles, stepsOutline) {
+// errorInfo: {hasData, text} —— 有真实练习错因就优先按真实错因写易错点；没有就按通用易错点并在正文里如实标注。
+async function generateCheatsheet(subject, nodeTitles, stepsOutline, style, errorInfo) {
   const nodes = nodeTitles && nodeTitles.length ? `\n已沉淀的知识点：${nodeTitles.join('、')}` : '';
   const steps = stepsOutline ? `\n学过的路线：\n${stepsOutline}` : '';
+  const errRule =
+    errorInfo && errorInfo.hasData
+      ? `\n## 易错点清单 这一节必须优先根据这个学生真实的练习错因来写（点名他实际栽过的跟头、涉及的知识点，写清错在哪、正确的是什么），真实错因不够 4 条时再补通用易错点凑到 4~8 条：\n${errorInfo.text}`
+      : '\n## 易错点清单 这一节：这个学生还没有真实练习错因数据，按这门科目公认最容易搞错的地方写 4~8 条，并且必须在这一节的第一行写明：（暂无你的真实练习错因数据，以下是通用易错点）';
   return chat(
     [
       { role: 'system', content: TEACHER },
       {
         role: 'user',
-        content: `${subjectCtx(subject)}${nodes}${steps}\n\n请生成一份「速查表」：一页纸能看完的总结，用在考试或实战前快速扫一眼。Markdown 格式，700 字以内，结构固定为三节：\n## 核心概念速查\n每个核心概念一行：**概念名**——最关键的一句话（定义/公式/结论）。\n## 关系与主线\n用简短的条目讲清概念之间怎么串起来（谁推出谁、流程顺序）。\n## 易错点清单\n列 4~8 条最容易搞错、搞混的地方，每条一句：错在哪、正确的是什么。`,
+        content: `${subjectCtx(subject)}${nodes}${steps}\n\n请生成一份「速查表」：一页纸能看完的总结，用在考试或实战前快速扫一眼。Markdown 格式，700 字以内，结构固定为三节：\n## 核心概念速查\n每个核心概念一行：**概念名**——最关键的一句话（定义/公式/结论）。\n## 关系与主线\n用简短的条目讲清概念之间怎么串起来（谁推出谁、流程顺序）。\n## 易错点清单\n列 4~8 条，每条一句：错在哪、正确的是什么。${errRule}\n${docStyleRule(style)}`,
       },
     ],
     { temperature: 0.7 }
   );
 }
 
-// 费曼检验：学生用自己的话讲一遍，老师点评对/漏/错并追问。不判分、不卡进度。
+// 费曼检验：学生用自己的话讲一遍，老师点评对/漏/错并追问，并判定这一轮有没有「讲清」。
+// 返回 {feedback, passed}：passed=true 表示这一步已讲清（界面上打通过标记）；没讲清就继续追问下一轮。不卡进度。
 async function feynmanReview(subject, step, rounds, userText) {
   const hist = (rounds || [])
     .map((r, i) => `第 ${i + 1} 轮学生讲的：「${r.user}」\n老师当时的反馈摘要：${String(r.feedback || '').slice(0, 300)}`)
     .join('\n');
+  const raw = await chat(
+    [
+      { role: 'system', content: TEACHER },
+      {
+        role: 'user',
+        content: `${subjectCtx(subject)}\n\n现在是「讲给我听」环节：学生在用自己的话复述这一步「${step.title}」（${step.summary}），检验他是不是真懂了。${hist ? `\n之前的轮次：\n${hist}\n` : ''}\n学生这次讲的：「${userText}」\n\n请点评，Markdown 格式，300 字以内，结构：\n1. **讲对了什么**：具体点名他讲对的要点（别空夸）。\n2. **漏了什么**：这一步的关键点里他没提到的。\n3. **哪里讲错或糊弄过去了**：说得含糊、跳过推理、概念混淆的地方，直接点破并给正确说法；如果没有就说没有。\n4. 如果他这一轮已经把这一步的核心讲清楚了（关键要点基本都对、没有糊弄过去的地方），就肯定他讲清了，不要再追问；如果还没讲清，最后抛出**一个追问**，专挑他最含糊的地方问，让他再答一轮。\n5. 点评全部写完后，另起一行只输出状态标记（不要解释、不要加任何其他字）：讲清了就输出 @@STATE:passed@@，还没讲清就输出 @@STATE:continue@@。`,
+      },
+    ],
+    { temperature: 0.7 }
+  );
+  let text = String(raw || '');
+  let passed = false;
+  const m = text.match(/@@STATE:(passed|continue)@@/);
+  if (m) {
+    passed = m[1] === 'passed';
+    text = text.replace(/@@STATE:(passed|continue)@@/g, '').trim();
+  }
+  return { feedback: text, passed };
+}
+
+// 理解自评「还是不懂」时的补讲：找出这一步依赖的前置概念，先把地基补上，再接回这一步。
+async function reteachStep(subject, step, stepNo, teachText) {
   return chat(
     [
       { role: 'system', content: TEACHER },
       {
         role: 'user',
-        content: `${subjectCtx(subject)}\n\n现在是「讲给我听」环节：学生在用自己的话复述这一步「${step.title}」（${step.summary}），检验他是不是真懂了。${hist ? `\n之前的轮次：\n${hist}\n` : ''}\n学生这次讲的：「${userText}」\n\n请点评，Markdown 格式，300 字以内，结构：\n1. **讲对了什么**：具体点名他讲对的要点（别空夸）。\n2. **漏了什么**：这一步的关键点里他没提到的。\n3. **哪里讲错或糊弄过去了**：说得含糊、跳过推理、概念混淆的地方，直接点破并给正确说法；如果没有就说没有。\n4. 最后单独一行抛出**一个追问**，专挑他最含糊的地方问，让他再答一轮。语气像耐心的老师，不要打分、不要说通过不通过。`,
+        content: `${subjectCtx(subject)}\n\n学生刚学完第 ${stepNo} 步「${step.title}」（${step.summary}），他自评「还是不懂」。这一步的讲解是：\n${String(teachText).slice(0, 5000)}\n\n他大概率是卡在这一步依赖的某个前置概念上（地基没打好，后面的自然听不懂）。请给他一段补讲，Markdown 格式，500 字以内：\n1. 先点明：这一步默认你已经懂的是哪 1~2 个前置概念，他可能就是卡在这里。\n2. 把前置概念用大白话讲清，每个带一个小例子或比方，必须用术语时当场解释。\n3. 最后用几句话把前置概念和这一步接上：有了这个地基，这一步的哪个说法就顺理成章了。\n不要把原讲解整段重复一遍，不要出题，不要责备学生，语气耐心。`,
       },
     ],
     { temperature: 0.7 }
@@ -255,7 +296,9 @@ function noteStyleOf(style) {
   return style === 'pro' ? NOTE_STYLES.pro : NOTE_STYLES.easy;
 }
 
-// 把一步的讲解整理成笔记。已有笔记时只产出「增补」——新内容，不重复、不覆盖。增补按这次选的风格写。
+// 把一步的教学过程整理成笔记文档。素材由服务端拼好：学生的预测、老师的讲解、
+// 标「还是不懂」后的补讲、这一步涉及知识点在练习里暴露的错因——老师据此整理成文。
+// 已有笔记时只产出「增补」——新内容，不重复、不覆盖。增补按这次选的风格写。
 async function generateNote(subject, step, stepNo, teachText, existingContent, style) {
   const st = noteStyleOf(style);
   if (existingContent) {
@@ -264,7 +307,7 @@ async function generateNote(subject, step, stepNo, teachText, existingContent, s
         { role: 'system', content: TEACHER },
         {
           role: 'user',
-          content: `${subjectCtx(subject)}\n\n学生之前已经为第 ${stepNo} 步「${step.title}」生成过一份笔记，这次课又学了一遍这一步，讲解里可能有新角度、新例子或新要点。\n已有笔记：\n${existingContent.slice(0, 6000)}\n\n这次的讲解：\n${String(teachText).slice(0, 6000)}\n\n请只输出需要追加到笔记末尾的增补内容（Markdown，要点式）：已有笔记里没有的新要点、新例子、新提醒。不要重复已有内容，不要写标题和客套话。${st.appendRule}\n如果这次讲解和已有笔记比没有任何新东西，只输出这一句：没有新的补充。`,
+          content: `${subjectCtx(subject)}\n\n学生之前已经为第 ${stepNo} 步「${step.title}」生成过一份笔记，这次课又学了一遍这一步，教学记录里可能有新角度、新例子或新要点。\n已有笔记：\n${existingContent.slice(0, 6000)}\n\n这次的教学记录（学生的预测、老师的讲解与补讲、练习错因）：\n${String(teachText).slice(0, 6000)}\n\n请只输出需要追加到笔记末尾的增补内容（Markdown，要点式）：已有笔记里没有的新要点、新例子、新提醒。不要重复已有内容，不要写标题和客套话。${st.appendRule}\n如果这次教学记录和已有笔记比没有任何新东西，只输出这一句：没有新的补充。`,
         },
       ],
       { temperature: 0.5 }
@@ -278,7 +321,39 @@ async function generateNote(subject, step, stepNo, teachText, existingContent, s
       { role: 'system', content: TEACHER },
       {
         role: 'user',
-        content: `${subjectCtx(subject)}\n\n请把第 ${stepNo} 步「${step.title}」的课堂讲解整理成一份复习笔记。讲解原文：\n${String(teachText).slice(0, 8000)}\n\n要求：提炼，不要照抄原文。Markdown 格式。${st.firstRule}`,
+        content: `${subjectCtx(subject)}\n\n请把第 ${stepNo} 步「${step.title}」的教学过程整理成一份复习笔记文档。下面的记录包含：学生学之前的预测、老师的讲解、老师的补讲，以及这一步涉及知识点在练习里暴露的错因。整理时以讲解为准；学生预测里想错、记混的地方和练习错因，要变成笔记里的提醒写出来。\n\n教学记录：\n${String(teachText).slice(0, 8000)}\n\n要求：提炼，不要照抄原文。Markdown 格式。${st.firstRule}`,
+      },
+    ],
+    { temperature: 0.5 }
+  );
+  return { appended: true, addition: String(content || '').trim() };
+}
+
+// 知识点笔记：结合图谱里这个知识点的依赖关系与真实练习表现生成；已有则只产出增补（与步笔记同一套口径与风格）。
+// contextText 由服务端拼好：知识点说明（图谱依赖/被依赖关系）+ 练习表现（判分统计、错因）。
+async function generateNodeNote(subject, nodeTitle, contextText, existingContent, style) {
+  const st = noteStyleOf(style);
+  if (existingContent) {
+    const addition = await chat(
+      [
+        { role: 'system', content: TEACHER },
+        {
+          role: 'user',
+          content: `${subjectCtx(subject)}\n\n学生之前已经为知识点「${nodeTitle}」生成过一份笔记，现在他的图谱关系或练习表现有了新变化。\n已有笔记：\n${existingContent.slice(0, 6000)}\n\n这个知识点的最新情况：\n${String(contextText).slice(0, 4000)}\n\n请只输出需要追加到笔记末尾的增补内容（Markdown，要点式）：已有笔记里没有的新理解、新提醒（尤其是练习里新暴露的薄弱点）。不要重复已有内容，不要写标题和客套话。${st.appendRule}\n如果没有任何新东西，只输出这一句：没有新的补充。`,
+        },
+      ],
+      { temperature: 0.5 }
+    );
+    const a = String(addition || '').trim();
+    if (!a || /^没有新的补充/.test(a) || a.length < 8) return { appended: false, addition: '' };
+    return { appended: true, addition: a };
+  }
+  const content = await chat(
+    [
+      { role: 'system', content: TEACHER },
+      {
+        role: 'user',
+        content: `${subjectCtx(subject)}\n\n请为知识点「${nodeTitle}」整理一份复习笔记。关于这个知识点的已知信息（图谱里的位置、依赖关系、学生的真实练习表现）：\n${String(contextText).slice(0, 5000)}\n\n要求：提炼成能复习的笔记，不要编造信息里没有的练习结论。Markdown 格式。${st.firstRule}`,
       },
     ],
     { temperature: 0.5 }
@@ -329,6 +404,9 @@ module.exports = {
   generateTerms,
   generateCheatsheet,
   feynmanReview,
+  reteachStep,
   generateNote,
+  generateNodeNote,
   generateMindmap,
+  noteStyleOf,
 };

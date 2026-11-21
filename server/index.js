@@ -85,7 +85,7 @@ app.delete('/api/auth/avatar', (req, res) => {
   db.prepare("UPDATE users SET avatar='' WHERE id=?").run(req.user.id);
   res.json({ user: { ...req.user, avatar: '' } });
 });
-// 账号接口往后，所有 /api 都过门禁：还没人注册时放行，有用户后未登录一律 401。
+// 账号接口往后，所有 /api 都过登录墙：未登录一律 401，空库初始状态也不例外。
 app.use('/api', auth.requireAuth);
 
 const upload = multer({
@@ -101,10 +101,10 @@ function getSession(id) {
   return db.prepare('SELECT * FROM sessions WHERE id=?').get(id);
 }
 // ---------- 归属校验：科目是根实体，挂在它下面的课堂/闪卡/笔记都跟着科目算 ----------
-// 还没人注册（待认领）时都可见；有用户后只有科目主人能看，拿别人的 id 来请求一律当不存在（404）。
+// 数据接口都在登录墙之后（req.user 必有）；只有科目主人能看，拿别人的 id 来请求一律当不存在（404）。
+// 无主科目（user_id 为空的存量数据）在第一个账号注册认领之前谁都看不到。
 function subjectVisible(req, subject) {
   if (!subject) return false;
-  if (!req.hasUsers) return true;
   if (!req.user) return false;
   return subject.user_id === req.user.id;
 }
@@ -131,18 +131,25 @@ function sessionDetail(id) {
   }
   const stepNotes = {};
   for (const n of db
-    .prepare('SELECT id, step_index FROM notes WHERE subject_id=? AND session_id=?')
+    .prepare("SELECT id, step_index FROM notes WHERE subject_id=? AND session_id=? AND kind='step'")
     .all(s.subject_id, id)) {
     stepNotes[n.step_index] = n.id;
+  }
+  // 每步的理解自评（self/helped/stuck）与费曼通过状态，课堂页按步显示用
+  const stepMarks = {};
+  for (const mk of db.prepare('SELECT step_index, mark FROM step_marks WHERE session_id=?').all(id)) {
+    stepMarks[mk.step_index] = mk.mark;
   }
   return {
     ...s,
     roadmap: s.roadmap_json ? safeParse(s.roadmap_json) : null,
     quiz: s.quiz_json ? safeParse(s.quiz_json) : null,
     reviewNodeIds: s.review_node_ids ? safeParse(s.review_node_ids) : [],
+    feynman: s.feynman_json ? safeParse(s.feynman_json) || {} : {},
     messages,
     stepMindmaps,
     stepNotes,
+    stepMarks,
   };
 }
 function safeParse(s) {
@@ -175,19 +182,35 @@ function reviewPlanFor(subjectId) {
   });
 }
 
+// 三件套（总览/术语表/速查表）存在 notes 表里，接口 kind 与存储 kind 的对应：
+// overview→overview、terms→glossary、cheatsheet→cheatsheet。老 subject_docs 已在 db.js 启动时迁入，这里只读写 notes。
+// 注意：三件套是各自页签的文档，不出现在知识库列表里（知识库只收教学中点名生成的文档，见 /api/subjects/:id/notes）。
+const DOC_NOTE_KIND = { overview: 'overview', terms: 'glossary', cheatsheet: 'cheatsheet' };
+const DOC_NOTE_TITLE = { overview: '一页纸总览', terms: '术语表', cheatsheet: '速查表' };
 function getDoc(subjectId, kind) {
-  return db.prepare('SELECT * FROM subject_docs WHERE subject_id=? AND kind=?').get(subjectId, kind);
+  const row = db
+    .prepare('SELECT * FROM notes WHERE subject_id=? AND kind=?')
+    .get(subjectId, DOC_NOTE_KIND[kind] || kind);
+  return row || null;
 }
-function upsertDoc(subjectId, kind, content) {
+function upsertDoc(subjectId, kind, content, style) {
+  const noteKind = DOC_NOTE_KIND[kind] || kind;
   const existing = getDoc(subjectId, kind);
   if (existing) {
-    db.prepare('UPDATE subject_docs SET content=?, updated_at=? WHERE id=?').run(content, now(), existing.id);
+    db.prepare('UPDATE notes SET content=?, style=?, updated_at=? WHERE id=?').run(
+      content,
+      style || existing.style || '',
+      now(),
+      existing.id
+    );
     return getDoc(subjectId, kind);
   }
   const info = db
-    .prepare('INSERT INTO subject_docs (subject_id, kind, content, created_at, updated_at) VALUES (?,?,?,?,?)')
-    .run(subjectId, kind, content, now(), now());
-  return db.prepare('SELECT * FROM subject_docs WHERE id=?').get(info.lastInsertRowid);
+    .prepare(
+      'INSERT INTO notes (subject_id, session_id, step_index, step_title, title, content, kind, style, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)'
+    )
+    .run(subjectId, null, -1, '', DOC_NOTE_TITLE[kind] || kind, content, noteKind, style || '', now(), now());
+  return db.prepare('SELECT * FROM notes WHERE id=?').get(info.lastInsertRowid);
 }
 
 function wrap(fn) {
@@ -338,11 +361,10 @@ app.post(
     const questions = await ai.probeQuestions(subject); // 没配 Key 会在这里给出白话提示
     // 速成科目开课前先有一页纸总览：还没有就顺手生成一份（生成失败不挡上课，科目页可手动补）
     if (subject.mode === 'crash') {
-      const has = db.prepare('SELECT id FROM subject_docs WHERE subject_id=? AND kind=?').get(subject.id, 'overview');
-      if (!has) {
+      if (!getDoc(subject.id, 'overview')) {
         try {
-          const content = await ai.buildOverview(subject);
-          upsertDoc(subject.id, 'overview', content);
+          const content = await ai.buildOverview(subject, 'easy');
+          upsertDoc(subject.id, 'overview', content, 'easy');
         } catch {
           /* 总览没生成出来不影响开课 */
         }
@@ -508,7 +530,10 @@ app.post(
   })
 );
 
-// ---------- 快速学习套件：总览 / 术语表 / 速查表 ----------
+// ---------- 快速学习套件：总览 / 术语表 / 速查表（存 notes 表，各自页签独立展示，不进知识库） ----------
+function styleOfBody(req) {
+  return (req.body || {}).style === 'pro' ? 'pro' : 'easy';
+}
 app.get('/api/subjects/:id/docs', (req, res) => {
   const subject = getOwnedSubject(req, req.params.id);
   if (!subject) return res.status(404).json({ error: '科目不存在。' });
@@ -528,8 +553,9 @@ app.post(
   wrap(async (req, res) => {
     const subject = getOwnedSubject(req, req.params.id);
     if (!subject) return res.status(404).json({ error: '科目不存在。' });
-    const content = await ai.buildOverview(subject);
-    res.json(upsertDoc(subject.id, 'overview', content));
+    const style = styleOfBody(req);
+    const content = await ai.buildOverview(subject, style);
+    res.json(upsertDoc(subject.id, 'overview', content, style));
   })
 );
 app.post(
@@ -537,24 +563,43 @@ app.post(
   wrap(async (req, res) => {
     const subject = getOwnedSubject(req, req.params.id);
     if (!subject) return res.status(404).json({ error: '科目不存在。' });
-    const terms = await ai.generateTerms(subject);
-    const doc = upsertDoc(subject.id, 'terms', JSON.stringify({ terms }));
+    const style = styleOfBody(req);
+    const terms = await ai.generateTerms(subject, style);
+    const doc = upsertDoc(subject.id, 'terms', JSON.stringify({ terms }), style);
     res.json({ ...doc, terms });
   })
 );
+// 速查表的真实错因素材：这科 review_events 里带错因的记录，按错因类型与涉及知识点汇总给老师。
+function cheatsheetErrorInfo(subjectId) {
+  const rows = db
+    .prepare(
+      `SELECT e.error_cause AS cause, n.title AS node_title, COUNT(*) AS c
+       FROM review_events e JOIN nodes n ON n.id=e.node_id
+       WHERE e.subject_id=? AND e.error_cause<>''
+       GROUP BY e.error_cause, n.title ORDER BY c DESC`
+    )
+    .all(subjectId);
+  if (!rows.length) return { hasData: false, text: '' };
+  const CAUSE_LABEL = { careless: '粗心', execution: '执行出错', concept: '概念没懂', memory: '记混了', other: '其他' };
+  const lines = rows.map((r) => `- 错因「${CAUSE_LABEL[r.cause] || r.cause}」：知识点「${r.node_title}」栽过 ${r.c} 次`);
+  return { hasData: true, text: lines.join('\n') };
+}
 app.post(
   '/api/subjects/:id/cheatsheet',
   wrap(async (req, res) => {
     const subject = getOwnedSubject(req, req.params.id);
     if (!subject) return res.status(404).json({ error: '科目不存在。' });
+    const style = styleOfBody(req);
     const nodeTitles = db.prepare('SELECT title FROM nodes WHERE subject_id=? ORDER BY id ASC').all(subject.id).map((n) => n.title);
     const latest = db
       .prepare("SELECT roadmap_json FROM sessions WHERE subject_id=? AND kind='lesson' AND roadmap_json<>'' ORDER BY id DESC LIMIT 1")
       .get(subject.id);
     const roadmap = latest ? safeParse(latest.roadmap_json) : null;
     const outline = roadmap ? roadmap.steps.map((s, i) => `${i + 1}. ${s.title}：${s.summary}`).join('\n') : '';
-    const content = await ai.generateCheatsheet(subject, nodeTitles, outline);
-    res.json(upsertDoc(subject.id, 'cheatsheet', content));
+    const errorInfo = cheatsheetErrorInfo(subject.id);
+    const content = await ai.generateCheatsheet(subject, nodeTitles, outline, style, errorInfo);
+    const doc = upsertDoc(subject.id, 'cheatsheet', content, style);
+    res.json({ ...doc, usedRealErrors: errorInfo.hasData });
   })
 );
 
@@ -585,9 +630,53 @@ app.post(
       }
     }
     addMessage(s.id, 'user', 'feynman', text, { stepIndex });
-    const feedback = await ai.feynmanReview(subject, step, rounds, text);
-    addMessage(s.id, 'assistant', 'feynman_feedback', feedback, { stepIndex });
+    const r = await ai.feynmanReview(subject, step, rounds, text);
+    addMessage(s.id, 'assistant', 'feynman_feedback', r.feedback, { stepIndex, passed: r.passed });
+    // 通过状态存 session 级：讲清了就记 passed（之后再讲也不取消），轮次累加，重进课堂能看到
+    const feynman = s.feynman_json ? safeParse(s.feynman_json) || {} : {};
+    const prev = feynman[stepIndex] || { passed: false, rounds: 0 };
+    feynman[stepIndex] = {
+      passed: Boolean(prev.passed || r.passed),
+      rounds: (prev.rounds || 0) + 1,
+      updated_at: now(),
+    };
+    touchSession(s.id, { feynman_json: JSON.stringify(feynman) });
     res.json(sessionDetail(s.id));
+  })
+);
+
+// ---------- 理解自评（三档）+ 还是不懂自动补讲 ----------
+app.post(
+  '/api/sessions/:id/steps/:stepIndex/mark',
+  wrap(async (req, res) => {
+    const s = getOwnedSession(req, req.params.id);
+    if (!s) return res.status(404).json({ error: '课堂不存在。' });
+    const subject = getSubject(s.subject_id);
+    const stepIndex = Number(req.params.stepIndex);
+    const mark = String((req.body || {}).mark || '');
+    if (!['self', 'helped', 'stuck'].includes(mark)) return res.status(400).json({ error: '自评档位不对。' });
+    const roadmap = s.roadmap_json ? safeParse(s.roadmap_json) : null;
+    const step = roadmap && roadmap.steps[stepIndex];
+    if (!step) return res.status(400).json({ error: '找不到这一步。' });
+    const existing = db
+      .prepare('SELECT * FROM step_marks WHERE subject_id=? AND session_id=? AND step_index=?')
+      .get(subject.id, s.id, stepIndex);
+    if (existing) {
+      db.prepare('UPDATE step_marks SET mark=?, updated_at=? WHERE id=?').run(mark, now(), existing.id);
+    } else {
+      db.prepare(
+        'INSERT INTO step_marks (subject_id, session_id, step_index, mark, created_at, updated_at) VALUES (?,?,?,?,?,?)'
+      ).run(subject.id, s.id, stepIndex, mark, now(), now());
+    }
+    let reteach = null;
+    if (mark === 'stuck') {
+      // 标「还是不懂」：自动生成一段前置概念补讲，存进课堂消息流，就在这一步讲解后面
+      const teach = teachMessageFor(s.id, stepIndex);
+      if (!teach) return res.status(400).json({ error: '这一步还没讲过，先听完讲解再自评。' });
+      const text = await ai.reteachStep(subject, step, stepIndex + 1, teach.content);
+      reteach = addMessage(s.id, 'assistant', 'reteach', text, { stepIndex });
+    }
+    res.json({ mark, reteach: reteach ? { ...reteach, meta: { stepIndex } } : null, session: sessionDetail(s.id) });
   })
 );
 
@@ -602,6 +691,48 @@ function teachMessageFor(sessionId, stepIndex) {
 }
 function getNote(id) {
   return db.prepare('SELECT * FROM notes WHERE id=?').get(id);
+}
+// 一步的教学素材：学生的预测 + 老师讲解 + 补讲 + 这一步涉及知识点的真实练习错因。
+// 生成步笔记 / 步导图时喂给老师——文档是「这节课真实发生过什么」的整理，而不是只复述讲解。
+function stepTeachingMaterial(subjectId, sessionId, step, stepIndex) {
+  const msgs = db.prepare('SELECT * FROM messages WHERE session_id=? ORDER BY id ASC').all(sessionId);
+  const byType = (type) =>
+    msgs.filter((m) => {
+      if (m.type !== type) return false;
+      const meta = m.meta_json ? safeParse(m.meta_json) : null;
+      return meta && meta.stepIndex === stepIndex;
+    });
+  const parts = [];
+  const prediction = byType('prediction')[0];
+  if (prediction) parts.push(`【学生学之前的预测】\n${prediction.content}`);
+  const teach = byType('teach')[0];
+  if (teach) parts.push(`【老师的讲解】\n${teach.content}`);
+  const reteaches = byType('reteach');
+  if (reteaches.length) {
+    parts.push(`【老师的补讲】（学生标了「还是不懂」后补讲的前置概念）\n${reteaches.map((m) => m.content).join('\n\n')}`);
+  }
+  const CAUSE_LABEL = { careless: '粗心', execution: '执行出错', concept: '概念没懂', memory: '记混了', other: '其他' };
+  const errLines = [];
+  for (const title of step.nodeTitles || []) {
+    const node = nodeByTitle(subjectId, title);
+    if (!node) continue;
+    const events = db.prepare('SELECT result, error_cause FROM review_events WHERE node_id=?').all(node.id);
+    if (!events.length) continue;
+    const cnt = { full: 0, partial: 0, miss: 0 };
+    const causes = {};
+    for (const e of events) {
+      if (cnt[e.result] !== undefined) cnt[e.result]++;
+      if (e.error_cause) causes[e.error_cause] = (causes[e.error_cause] || 0) + 1;
+    }
+    const causeText = Object.entries(causes)
+      .map(([c, n]) => `${CAUSE_LABEL[c] || c} ${n} 次`)
+      .join('、');
+    errLines.push(
+      `- 知识点「${node.title}」：共判分 ${events.length} 次——答全 ${cnt.full} 次、答到一部分 ${cnt.partial} 次、没答到 ${cnt.miss} 次${causeText ? `；错因：${causeText}` : ''}`
+    );
+  }
+  if (errLines.length) parts.push(`【练习里暴露的错因】（真实判分记录）\n${errLines.join('\n')}`);
+  return parts.join('\n\n');
 }
 app.post(
   '/api/sessions/:id/steps/:stepIndex/note',
@@ -620,12 +751,14 @@ app.post(
     const existing = db
       .prepare('SELECT * FROM notes WHERE subject_id=? AND session_id=? AND step_index=?')
       .get(subject.id, s.id, stepIndex);
-    const r = await ai.generateNote(subject, step, stepIndex + 1, teach.content, existing ? existing.content : '', style);
+    const material = stepTeachingMaterial(subject.id, s.id, step, stepIndex);
+    const r = await ai.generateNote(subject, step, stepIndex + 1, material, existing ? existing.content : '', style);
     if (existing) {
       if (r.appended) {
         const date = new Date().toLocaleDateString('zh-CN');
         const content = `${existing.content}\n\n---\n\n### 补充 · ${date}\n\n${r.addition}`;
-        db.prepare('UPDATE notes SET content=?, updated_at=? WHERE id=?').run(content, now(), existing.id);
+        // style 记最近一次生成用的风格
+        db.prepare('UPDATE notes SET content=?, style=?, updated_at=? WHERE id=?').run(content, style, now(), existing.id);
       } else {
         db.prepare('UPDATE notes SET updated_at=? WHERE id=?').run(now(), existing.id);
       }
@@ -633,21 +766,217 @@ app.post(
     }
     const info = db
       .prepare(
-        'INSERT INTO notes (subject_id, session_id, step_index, step_title, title, content, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)'
+        "INSERT INTO notes (subject_id, session_id, step_index, step_title, title, content, kind, style, created_at, updated_at) VALUES (?,?,?,?,?,?,'step',?,?,?)"
       )
-      .run(subject.id, s.id, stepIndex, step.title, step.title, r.addition, now(), now());
+      .run(subject.id, s.id, stepIndex, step.title, step.title, r.addition, style, now(), now());
     res.json({ note: getNote(info.lastInsertRowid), appended: true, created: true });
   })
 );
+// ---------- 知识点级笔记 / 导图（图谱页每个知识点一份） ----------
+// 知识点笔记的素材：图谱里它的依赖关系 + 真实练习表现（判分统计与错因），不编造。
+function nodeNoteContext(subjectId, node) {
+  const byId = Object.fromEntries(
+    db.prepare('SELECT id, title FROM nodes WHERE subject_id=?').all(subjectId).map((n) => [n.id, n.title])
+  );
+  const outEdges = db.prepare('SELECT * FROM edges WHERE subject_id=? AND from_id=?').all(subjectId, node.id);
+  const inEdges = db.prepare('SELECT * FROM edges WHERE subject_id=? AND to_id=?').all(subjectId, node.id);
+  const lines = [`知识点：${node.title}`, `当前状态：${{ new: '未学', learning: '学过未通过', passed: '已通过' }[node.status] || node.status}`];
+  if (outEdges.length) {
+    lines.push(`它依赖（先懂这些才懂它）：${outEdges.map((e) => `「${byId[e.to_id]}」${e.reason ? `（${e.reason}）` : ''}`).join('；')}`);
+  }
+  if (inEdges.length) {
+    lines.push(`依赖它的（它是这些的前提）：${inEdges.map((e) => `「${byId[e.from_id]}」${e.reason ? `（${e.reason}）` : ''}`).join('；')}`);
+  }
+  const events = db.prepare('SELECT result, error_cause FROM review_events WHERE node_id=? ORDER BY id ASC').all(node.id);
+  if (events.length) {
+    const cnt = { full: 0, partial: 0, miss: 0 };
+    const causes = {};
+    const CAUSE_LABEL = { careless: '粗心', execution: '执行出错', concept: '概念没懂', memory: '记混了', other: '其他' };
+    for (const e of events) {
+      if (cnt[e.result] !== undefined) cnt[e.result]++;
+      if (e.error_cause) causes[e.error_cause] = (causes[e.error_cause] || 0) + 1;
+    }
+    const causeText = Object.entries(causes)
+      .map(([c, n]) => `${CAUSE_LABEL[c] || c} ${n} 次`)
+      .join('、');
+    lines.push(
+      `真实练习表现：共判分 ${events.length} 次——答全 ${cnt.full} 次、答到一部分 ${cnt.partial} 次、没答到 ${cnt.miss} 次${causeText ? `；错因分布：${causeText}` : ''}。`
+    );
+  } else {
+    lines.push('真实练习表现：还没有练过这个知识点（没有判分记录）。');
+  }
+  return lines.join('\n');
+}
+function getNodeNote(subjectId, nodeId) {
+  return db.prepare("SELECT * FROM notes WHERE subject_id=? AND kind='node' AND node_id=?").get(subjectId, nodeId);
+}
+function getOwnedNode(req, nodeId) {
+  const node = db.prepare('SELECT * FROM nodes WHERE id=?').get(nodeId);
+  if (!node) return null;
+  return subjectVisible(req, getSubject(node.subject_id)) ? node : null;
+}
+app.post(
+  '/api/nodes/:id/note',
+  wrap(async (req, res) => {
+    const node = getOwnedNode(req, req.params.id);
+    if (!node) return res.status(404).json({ error: '知识点不存在。' });
+    const subject = getSubject(node.subject_id);
+    const style = (req.body || {}).style === 'pro' ? 'pro' : 'easy';
+    const existing = getNodeNote(subject.id, node.id);
+    const ctx = nodeNoteContext(subject.id, node);
+    const r = await ai.generateNodeNote(subject, node.title, ctx, existing ? existing.content : '', style);
+    if (existing) {
+      if (r.appended) {
+        const date = new Date().toLocaleDateString('zh-CN');
+        const content = `${existing.content}\n\n---\n\n### 补充 · ${date}\n\n${r.addition}`;
+        db.prepare('UPDATE notes SET content=?, style=?, updated_at=? WHERE id=?').run(content, style, now(), existing.id);
+      } else {
+        db.prepare('UPDATE notes SET updated_at=? WHERE id=?').run(now(), existing.id);
+      }
+      return res.json({ note: getNote(existing.id), appended: r.appended, created: false });
+    }
+    if (!r.addition) return res.status(400).json({ error: '笔记生成失败，请重试。' });
+    const info = db
+      .prepare(
+        "INSERT INTO notes (subject_id, session_id, step_index, step_title, title, content, kind, style, node_id, node_title, created_at, updated_at) VALUES (?,?,?,'',?,?,'node',?,?,?,?,?)"
+      )
+      .run(subject.id, null, -1, node.title, r.addition, style, node.id, node.title, now(), now());
+    res.json({ note: getNote(info.lastInsertRowid), appended: true, created: true });
+  })
+);
+app.post(
+  '/api/nodes/:id/mindmap',
+  wrap(async (req, res) => {
+    const node = getOwnedNode(req, req.params.id);
+    if (!node) return res.status(404).json({ error: '知识点不存在。' });
+    const subject = getSubject(node.subject_id);
+    // 导图素材优先用这个知识点的笔记，还没有笔记就用图谱关系与练习表现
+    const note = getNodeNote(subject.id, node.id);
+    const source = note && note.content ? note.content : nodeNoteContext(subject.id, node);
+    const tree = await ai.generateMindmap(subject, node.title, source);
+    const stored = JSON.stringify(tree);
+    const existing = db
+      .prepare("SELECT * FROM notes WHERE subject_id=? AND kind='mindmap' AND node_id=?")
+      .get(subject.id, node.id);
+    if (existing) {
+      db.prepare('UPDATE notes SET content=?, title=?, updated_at=? WHERE id=?').run(stored, node.title, now(), existing.id);
+      return res.json({ entryId: `n${existing.id}`, noteId: existing.id, content: stored });
+    }
+    const info = db
+      .prepare(
+        "INSERT INTO notes (subject_id, session_id, step_index, step_title, title, content, kind, style, node_id, node_title, created_at, updated_at) VALUES (?,?,?,'',?,?,'mindmap','',?,?,?,?)"
+      )
+      .run(subject.id, null, -1, node.title, stored, node.id, node.title, now(), now());
+    res.json({ entryId: `n${info.lastInsertRowid}`, noteId: Number(info.lastInsertRowid), content: stored });
+  })
+);
+
+// ---------- 知识库：只收「老师在教学中应学生要求生成的文档」 ----------
+// 步笔记（kind=step）、知识点笔记（kind=node）、思维导图文档（kind=mindmap 的行、
+// 笔记自带的导图、课堂按步导图）。总览/术语表/速查表虽然也存在 notes 表里（kind=overview/
+// glossary/cheatsheet），但那是各自页签的预制文档，不进知识库列表——数据保留、页签照常读写。
+// 每条带 entryId：n<notes行id> 本表行；nm<笔记id> 笔记自带的导图（存在 notes.mindmap）；sm<mindmaps行id> 课堂按步导图。
 app.get('/api/subjects/:id/notes', (req, res) => {
   const subject = getOwnedSubject(req, req.params.id);
   if (!subject) return res.status(404).json({ error: '科目不存在。' });
-  const notes = db
-    .prepare(
-      'SELECT id, subject_id, session_id, step_index, step_title, title, created_at, updated_at, (mindmap<>\'\') AS has_mindmap, length(content) AS content_len FROM notes WHERE subject_id=? ORDER BY session_id ASC, step_index ASC'
-    )
+  const entries = [];
+  const rows = db
+    .prepare("SELECT * FROM notes WHERE subject_id=? AND kind IN ('step','node','mindmap') ORDER BY updated_at DESC")
     .all(subject.id);
-  res.json(notes);
+  for (const n of rows) {
+    entries.push({
+      entryId: `n${n.id}`,
+      noteId: n.id,
+      kind: n.kind || 'step',
+      style: n.style || '',
+      title: n.title,
+      session_id: n.session_id,
+      step_index: n.step_index,
+      step_title: n.step_title,
+      node_id: n.node_id,
+      node_title: n.node_title,
+      has_mindmap: Boolean(n.mindmap),
+      content_len: (n.content || '').length,
+      created_at: n.created_at,
+      updated_at: n.updated_at,
+    });
+    if (n.mindmap) {
+      entries.push({
+        entryId: `nm${n.id}`,
+        noteId: n.id,
+        kind: 'mindmap',
+        style: '',
+        title: `${n.title} · 思维导图`,
+        session_id: n.session_id,
+        step_index: n.step_index,
+        step_title: n.step_title,
+        node_id: n.node_id,
+        node_title: n.node_title,
+        has_mindmap: false,
+        content_len: n.mindmap.length,
+        created_at: n.created_at,
+        updated_at: n.updated_at,
+      });
+    }
+  }
+  for (const mm of db.prepare('SELECT * FROM mindmaps WHERE subject_id=? ORDER BY updated_at DESC').all(subject.id)) {
+    entries.push({
+      entryId: `sm${mm.id}`,
+      noteId: null,
+      mindmapId: mm.id,
+      kind: 'mindmap',
+      style: '',
+      title: `${mm.step_title || mm.title} · 思维导图`,
+      session_id: mm.session_id,
+      step_index: mm.step_index,
+      step_title: mm.step_title,
+      node_id: null,
+      node_title: '',
+      has_mindmap: false,
+      content_len: (mm.content || '').length,
+      created_at: mm.created_at,
+      updated_at: mm.updated_at,
+    });
+  }
+  entries.sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
+  res.json(entries);
+});
+app.get('/api/mindmaps/:id', (req, res) => {
+  const mm = db.prepare('SELECT * FROM mindmaps WHERE id=?').get(req.params.id);
+  if (!mm || !subjectVisible(req, getSubject(mm.subject_id))) {
+    return res.status(404).json({ error: '思维导图不存在。' });
+  }
+  res.json(mm);
+});
+// 删除知识库条目（删前确认在前端做）：n 行直删（步笔记连带它在库里的导图行是派生的、随行消失）；
+// 知识点笔记删掉时连带删它的导图行；nm 只清笔记自带导图；sm 删课堂导图行。
+app.delete('/api/notes/:entryId', (req, res) => {
+  const entryId = String(req.params.entryId || '');
+  const mN = entryId.match(/^n(\d+)$/);
+  const mNm = entryId.match(/^nm(\d+)$/);
+  const mSm = entryId.match(/^sm(\d+)$/);
+  if (mNm) {
+    const n = getNote(mNm[1]);
+    if (!n || !subjectVisible(req, getSubject(n.subject_id))) return res.status(404).json({ error: '笔记不存在。' });
+    db.prepare("UPDATE notes SET mindmap='', updated_at=? WHERE id=?").run(now(), n.id);
+    return res.json({ ok: true });
+  }
+  if (mSm) {
+    const mm = db.prepare('SELECT * FROM mindmaps WHERE id=?').get(mSm[1]);
+    if (!mm || !subjectVisible(req, getSubject(mm.subject_id))) return res.status(404).json({ error: '思维导图不存在。' });
+    db.prepare('DELETE FROM mindmaps WHERE id=?').run(mm.id);
+    return res.json({ ok: true });
+  }
+  if (mN) {
+    const n = getNote(mN[1]);
+    if (!n || !subjectVisible(req, getSubject(n.subject_id))) return res.status(404).json({ error: '笔记不存在。' });
+    if (n.kind === 'node' && n.node_id) {
+      db.prepare("DELETE FROM notes WHERE subject_id=? AND kind='mindmap' AND node_id=?").run(n.subject_id, n.node_id);
+    }
+    db.prepare('DELETE FROM notes WHERE id=?').run(n.id);
+    return res.json({ ok: true });
+  }
+  return res.status(400).json({ error: '条目不对。' });
 });
 app.get('/api/notes/:id', (req, res) => {
   const n = getNote(req.params.id);
@@ -684,17 +1013,23 @@ app.post(
     if (!step) return res.status(400).json({ error: '找不到这一步。' });
     const teach = teachMessageFor(s.id, stepIndex);
     if (!teach) return res.status(400).json({ error: '这一步还没讲过，先听完讲解再生成思维导图。' });
-    const tree = await ai.generateMindmap(subject, step.title, teach.content);
+    const material = stepTeachingMaterial(subject.id, s.id, step, stepIndex);
+    const tree = await ai.generateMindmap(subject, step.title, material);
     const stored = JSON.stringify(tree); // 存树结构 JSON，前端自绘渲染
     const existing = db.prepare('SELECT * FROM mindmaps WHERE session_id=? AND step_index=?').get(s.id, stepIndex);
+    let mindmapId;
     if (existing) {
       db.prepare('UPDATE mindmaps SET content=?, title=?, updated_at=? WHERE id=?').run(stored, step.title, now(), existing.id);
+      mindmapId = existing.id;
     } else {
-      db.prepare(
-        'INSERT INTO mindmaps (subject_id, session_id, step_index, step_title, title, content, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)'
-      ).run(subject.id, s.id, stepIndex, step.title, step.title, stored, now(), now());
+      const info = db
+        .prepare(
+          'INSERT INTO mindmaps (subject_id, session_id, step_index, step_title, title, content, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)'
+        )
+        .run(subject.id, s.id, stepIndex, step.title, step.title, stored, now(), now());
+      mindmapId = Number(info.lastInsertRowid);
     }
-    res.json({ stepIndex, content: stored });
+    res.json({ stepIndex, content: stored, mindmapId });
   })
 );
 
@@ -792,6 +1127,43 @@ app.post(
         'INSERT INTO cards (subject_id, node_id, front, back, ease, interval_days, reps, due_at, created_at) VALUES (?,?,?,?,2.5,0,0,?,?)'
       ).run(subjectId, nodeId, c.front, c.back, now(), now());
     }
+  })
+);
+// 脱钩闪卡修复：node_id 为空（或指向已不存在的知识点）的卡，按正反面内容与图谱知识点重新匹配挂回。
+app.post(
+  '/api/subjects/:id/cards/repair',
+  wrap(async (req, res) => {
+    const subject = getOwnedSubject(req, req.params.id);
+    if (!subject) return res.status(404).json({ error: '科目不存在。' });
+    const nodes = db.prepare('SELECT * FROM nodes WHERE subject_id=? ORDER BY id ASC').all(subject.id);
+    const orphans = db
+      .prepare(
+        `SELECT c.* FROM cards c LEFT JOIN nodes n ON n.id=c.node_id
+         WHERE c.subject_id=? AND (c.node_id IS NULL OR n.id IS NULL)`
+      )
+      .all(subject.id);
+    let repaired = 0;
+    for (const card of orphans) {
+      const hay = normalizeTitle(`${card.front} ${card.back}`);
+      let best = null;
+      let bestScore = 0;
+      for (const node of nodes) {
+        const norm = node.norm;
+        if (!norm) continue;
+        let score = 0;
+        if (hay.includes(norm)) score = norm.length * 2; // 正反面里直接出现知识点标题，最可信
+        else if (norm.includes(normalizeTitle(card.front).slice(0, 12)) && normalizeTitle(card.front).length >= 4) score = 4;
+        if (score > bestScore) {
+          bestScore = score;
+          best = node;
+        }
+      }
+      if (best) {
+        db.prepare('UPDATE cards SET node_id=? WHERE id=?').run(best.id, card.id);
+        repaired++;
+      }
+    }
+    res.json({ total: orphans.length, repaired, remaining: orphans.length - repaired });
   })
 );
 app.post('/api/cards/:id/review', (req, res) => {
@@ -961,7 +1333,16 @@ app.get('/api/profile', (req, res) => {
       stats.passedSteps += s.phase === 'done' || s.phase === 'quiz' ? total : s.phase === 'learning' ? Math.min(s.step_index, total) : 0;
     }
     stats.cardCount = db.prepare(`SELECT COUNT(*) c FROM cards WHERE subject_id IN (${inIds})`).get().c;
-    stats.noteCount = db.prepare(`SELECT COUNT(*) c FROM notes WHERE subject_id IN (${inIds})`).get().c;
+    // 笔记数只数知识库里的文档：步笔记 + 知识点笔记 + 思维导图文档（导图行、笔记自带导图、课堂按步导图），
+    // 与科目页「知识库」列表的条数口径一致；总览/术语/速查是各自页签的文档，不算。
+    stats.noteCount =
+      db
+        .prepare(`SELECT COUNT(*) c FROM notes WHERE subject_id IN (${inIds}) AND kind IN ('step','node','mindmap')`)
+        .get().c +
+      db
+        .prepare(`SELECT COUNT(*) c FROM notes WHERE subject_id IN (${inIds}) AND kind IN ('step','node') AND mindmap<>''`)
+        .get().c +
+      db.prepare(`SELECT COUNT(*) c FROM mindmaps WHERE subject_id IN (${inIds})`).get().c;
     // 热力图计数
     for (const r of db.prepare(`SELECT created_at FROM review_events WHERE subject_id IN (${inIds})`).all()) bump(r.created_at);
     for (const r of db
@@ -1010,7 +1391,9 @@ app.get('/api/profile', (req, res) => {
       recent.push({ time: r.t, text: r.kind === 'review' ? `在《${r.subject_title}》开始了一次复习` : `在《${r.subject_title}》开了一节新课` });
     }
     for (const n of db
-      .prepare(`SELECT title, created_at, updated_at FROM notes WHERE subject_id IN (${inIds}) ORDER BY updated_at DESC LIMIT 10`)
+      .prepare(
+        `SELECT title, created_at, updated_at FROM notes WHERE subject_id IN (${inIds}) AND kind IN ('step','node') ORDER BY updated_at DESC LIMIT 10`
+      )
       .all()) {
       if (n.updated_at > n.created_at) recent.push({ time: n.updated_at, text: `增补了笔记《${n.title}》` });
       else recent.push({ time: n.created_at, text: `生成了笔记《${n.title}》` });
