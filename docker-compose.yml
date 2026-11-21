@@ -1,0 +1,23 @@
+# 多学堂 Web 版 · Docker Compose 部署
+# 启动：docker compose up -d --build
+# 更新：传新代码后同样执行 docker compose up -d --build
+services:
+  learning-space-web:
+    build: .
+    image: learning-space-web:latest
+    container_name: learning-space-web
+    restart: unless-stopped
+    ports:
+      # 宿主机端口可用 .env 里的 HOST_PORT 覆盖（默认 8080）
+      - "${HOST_PORT:-8080}:8080"
+    environment:
+      - PORT=8080
+      # 云端朗读（edge-tts）可选代理：在 .env 里写 EDGE_TTS_PROXY=http://host.docker.internal:7890
+      # 就能借宿主机的代理出网；不写这一行就是容器直连，没影响。
+      - EDGE_TTS_PROXY=${EDGE_TTS_PROXY:-}
+    extra_hosts:
+      # 让容器能用 host.docker.internal 指到宿主机（给上面的代理地址用）
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # 数据库与 settings.json（含模型 Key）持久化在本目录 data/ 下
+      - ./data:/app/data

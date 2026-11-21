@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>多学堂 Web 版</title>
+    <link rel="icon" type="image/webp" href="/logo.webp" />
+    <script>
+      // 皮肤预置：E 多邻国（默认）/ F 语雀，先于样式应用，避免闪烁
+      try {
+        document.documentElement.dataset.theme = localStorage.getItem('lsw-theme') === 'f' ? 'f' : 'e';
+      } catch (e) {
+        document.documentElement.dataset.theme = 'e';
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
