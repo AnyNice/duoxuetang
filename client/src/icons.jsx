@@ -179,6 +179,14 @@ const PATHS = {
   ),
   // 速成 / 冲刺：闪电（Lucide zap）
   zap: <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />,
+  // 常规：路线（Lucide route，两个点连一条路，与空间版同款）
+  route: (
+    <>
+      <circle cx="6" cy="19" r="3" />
+      <path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15" />
+      <circle cx="18" cy="5" r="3" />
+    </>
+  ),
   // 总览：闪光（Lucide sparkles）
   sparkles: (
     <>

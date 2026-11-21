@@ -177,7 +177,13 @@ export default function App() {
           />
         ) : (
           <>
-            {view.name === 'home' && <Home theme={theme} onOpen={(id) => setView({ name: 'subject', subjectId: id })} />}
+            {view.name === 'home' && (
+              <Home
+                theme={theme}
+                onOpen={(id, tab) => setView({ name: 'subject', subjectId: id, tab })}
+                onContinue={(subjectId, sessionId) => setView({ name: 'session', subjectId, sessionId })}
+              />
+            )}
             {view.name === 'profile' && (
               <ProfilePage user={me} onLogout={logout} onGoAuth={() => setView({ name: 'auth' })} onUserChange={setMe} />
             )}
@@ -502,33 +508,49 @@ function dayKey(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 function Heatmap({ data, total }) {
+  const scrollRef = useRef(null);
+  // 热力图比手机屏宽：默认滚到最右，先看到最近几周（用户想看全年再自己往左划）
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollLeft = el.scrollWidth;
+  }, [data]);
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const start = new Date(today);
   start.setDate(start.getDate() - today.getDay() - 52 * 7); // 回到 52 周前那周的周日
   const weeks = [];
-  const monthLabels = [];
-  let prevMonth = -1;
+  const monthStartWeeks = []; // 每月 1 号所在的那一列
   for (let w = 0; w < 53; w++) {
     const col = [];
     for (let d = 0; d < 7; d++) {
       const date = new Date(start);
       date.setDate(date.getDate() + w * 7 + d);
       col.push(date);
-    }
-    const m = col[0].getMonth();
-    if (m !== prevMonth) {
-      monthLabels.push({ week: w, label: `${m + 1}月` });
-      prevMonth = m;
+      if (date.getDate() === 1) monthStartWeeks.push({ week: w, label: `${date.getMonth() + 1}月` });
     }
     weeks.push(col);
   }
+  // 标签打在「包含该月 1 号」的那一列上（GitHub 贡献图同款），月份才和下面的格子对得上；
+  // 旧写法按列首周日的月份打标签，每月 1 号若不在周日，标签就会晚一列、整月错位。
+  // 窗口第一列是月中开始的半个月：离下一个标签 ≥3 周才标它，否则不标、让位给整月（标签占 3 列，防重叠）。
+  const monthLabels = [];
+  let lastLabelWeek = -10;
+  if (!monthStartWeeks.length || monthStartWeeks[0].week >= 3) {
+    monthLabels.push({ week: 0, label: `${start.getMonth() + 1}月` });
+    lastLabelWeek = 0;
+  }
+  for (const c of monthStartWeeks) {
+    if (c.week - lastLabelWeek >= 3) {
+      monthLabels.push(c);
+      lastLabelWeek = c.week;
+    }
+  }
   return (
     <div>
-      <div className="hm-scroll">
+      <div className="hm-scroll" ref={scrollRef}>
         <div className="hm-months">
           {monthLabels.map((ml) => (
-            <span key={ml.week} style={{ gridColumn: `${ml.week + 1} / span 4` }}>
+            <span key={ml.week} style={{ gridColumn: `${ml.week + 1} / span 3` }}>
               {ml.label}
             </span>
           ))}
@@ -557,6 +579,7 @@ function Heatmap({ data, total }) {
           </div>
         </div>
       </div>
+      <p className="muted hm-hint">图比屏宽，左右划可以看全年的记录（默认停在最近几周）。</p>
       <div className="row-between hm-foot">
         <span className="muted">过去一年共 {total} 次学习活动</span>
         <span className="hm-legend">
@@ -571,9 +594,36 @@ function Heatmap({ data, total }) {
   );
 }
 
-function Home({ onOpen, theme }) {
+// 行内二次确认删除钮（与空间版一致，不用 window.confirm）：
+// 点一下变「确认删除？」，3 秒内再点才真删；点别处失焦或超时自动还原。
+function DangerButton({ className = '', label = '删除', confirmLabel = '确认删除？', onConfirm }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 3000);
+    return () => clearTimeout(t);
+  }, [armed]);
+  return (
+    <button
+      type="button"
+      className={`danger ${className}${armed ? ' armed' : ''}`}
+      onClick={() => {
+        if (armed) {
+          setArmed(false);
+          onConfirm();
+        } else {
+          setArmed(true);
+        }
+      }}
+      onBlur={() => setArmed(false)}
+    >
+      {armed ? confirmLabel : label}
+    </button>
+  );
+}
+
+function Home({ onOpen, onContinue, theme }) {
   const [subjects, setSubjects] = useState([]);
-  const [stats, setStats] = useState({}); // 每个科目的明细统计（图谱状态、闪卡总数），只用来算 XP 与任务进度
   const [title, setTitle] = useState('');
   const [goal, setGoal] = useState('');
   const [mode, setMode] = useState('normal'); // normal 常规 | crash 速成
@@ -583,32 +633,8 @@ function Home({ onOpen, theme }) {
 
   const load = useCallback(async () => {
     try {
-      const list = await api.get('/api/subjects');
-      setSubjects(list);
-      // 明细统计：XP 只按真实「已通过」知识点数算，不许虚构
-      const entries = await Promise.all(
-        list.map(async (s) => {
-          try {
-            const [detail, cards] = await Promise.all([
-              api.get(`/api/subjects/${s.id}`),
-              api.get(`/api/subjects/${s.id}/cards`),
-            ]);
-            const nodes = detail.nodes || [];
-            return [
-              s.id,
-              {
-                nodes,
-                passed: nodes.filter((n) => n.status === 'passed').length,
-                learning: nodes.filter((n) => n.status === 'learning').length,
-                cardTotal: cards.length,
-              },
-            ];
-          } catch {
-            return [s.id, null];
-          }
-        })
-      );
-      setStats(Object.fromEntries(entries));
+      // 列表接口已带齐聚合（知识点数/已通过数/到期数/已完成步数/进行中的课），首页一次拉完
+      setSubjects(await api.get('/api/subjects'));
     } catch (e) {
       setError(e.message);
     }
@@ -617,11 +643,23 @@ function Home({ onOpen, theme }) {
     load();
   }, [load]);
 
-  const totalNodes = subjects.reduce((a, s) => a + (stats[s.id] ? stats[s.id].nodes.length : s.nodeCount || 0), 0);
-  const totalPassed = subjects.reduce((a, s) => a + (stats[s.id] ? stats[s.id].passed : 0), 0);
-  const totalDue = subjects.reduce((a, s) => a + (s.reviewDue || 0) + (s.cardDue || 0), 0);
+  const totalNodes = subjects.reduce((a, s) => a + (s.nodeCount || 0), 0);
+  const totalPassed = subjects.reduce((a, s) => a + (s.passedCount || 0), 0);
+  const totalReviewDue = subjects.reduce((a, s) => a + (s.reviewDue || 0), 0);
+  const totalCardDue = subjects.reduce((a, s) => a + (s.cardDue || 0), 0);
+  const totalDue = totalReviewDue + totalCardDue;
+  const totalDoneSteps = subjects.reduce((a, s) => a + (s.doneSteps || 0), 0);
   const xp = totalPassed * 20; // XP 口径：每个真实通过的知识点 20 XP
   const progressPct = totalNodes > 0 ? Math.round((totalPassed / totalNodes) * 100) : 0;
+  // 「继续上课」：所有科目里最近还在上的一节课（按课堂更新时间取最新）
+  let continueTarget = null;
+  for (const s of subjects) {
+    if (!s.activeSession) continue;
+    if (!continueTarget || String(s.activeSession.updatedAt) > String(continueTarget.session.updatedAt)) {
+      continueTarget = { subject: s, session: s.activeSession };
+    }
+  }
+  const dueSubjects = subjects.filter((s) => (s.reviewDue || 0) > 0 || (s.cardDue || 0) > 0);
 
   async function create() {
     setError('');
@@ -644,7 +682,6 @@ function Home({ onOpen, theme }) {
     }
   }
   async function remove(id) {
-    if (!confirm('删掉这个科目？它的课堂、图谱、闪卡和复习记录都会一起删掉。')) return;
     await api.del(`/api/subjects/${id}`);
     load();
   }
@@ -683,7 +720,8 @@ function Home({ onOpen, theme }) {
               <span className="xp-badge">
                 <Icon name="star" size={16} filled /> {xp} XP
               </span>
-              <span className="muted">已通过 {totalPassed} / 共 {totalNodes} 个知识点</span>
+              <span className="stat-capsule">已完成 {totalDoneSteps} 步</span>
+              <span className="stat-capsule">共 {totalNodes} 个知识点</span>
             </div>
             <div className="big-progress" role="progressbar" aria-valuenow={progressPct} aria-valuemin="0" aria-valuemax="100">
               <div className="big-progress-fill" style={{ width: `${progressPct}%` }} />
@@ -691,7 +729,103 @@ function Home({ onOpen, theme }) {
           </div>
         </div>
       )}
+      {continueTarget && (
+        <div className="card continue-card">
+          <div className="row-between">
+            <span>
+              <Icon name="play" size={16} /> <b>继续上课</b>
+              <span className="muted">
+                {' '}
+                《{continueTarget.subject.title}》· 课堂 #{continueTarget.session.id} ·{' '}
+                {PHASE_LABEL[continueTarget.session.phase] || continueTarget.session.phase}
+                {continueTarget.session.phase === 'learning' && `（学到第 ${continueTarget.session.stepIndex + 1} 步）`}
+              </span>
+            </span>
+            <button className="primary" onClick={() => onContinue(continueTarget.subject.id, continueTarget.session.id)}>
+              继续上课
+            </button>
+          </div>
+        </div>
+      )}
+      {totalDue > 0 && (
+        <div className="card due-card">
+          <h3>
+            <Icon name="calendar" size={17} /> 今日到期
+            <span className="muted">
+              （{totalReviewDue > 0 && `${totalReviewDue} 个知识点待复习`}
+              {totalReviewDue > 0 && totalCardDue > 0 && ' · '}
+              {totalCardDue > 0 && `${totalCardDue} 张闪卡待复习`}）
+            </span>
+          </h3>
+          <ul className="due-rows">
+            {dueSubjects.map((s) => (
+              <React.Fragment key={s.id}>
+                {(s.reviewDue || 0) > 0 && (
+                  <li>
+                    <span>
+                      《{s.title}》· {s.reviewDue} 个知识点待复习
+                    </span>
+                    <button className="small" onClick={() => onOpen(s.id, 'review')}>
+                      去复习
+                    </button>
+                  </li>
+                )}
+                {(s.cardDue || 0) > 0 && (
+                  <li>
+                    <span>
+                      《{s.title}》· {s.cardDue} 张闪卡待复习
+                    </span>
+                    <button className="small" onClick={() => onOpen(s.id, 'cards')}>
+                      去翻卡
+                    </button>
+                  </li>
+                )}
+              </React.Fragment>
+            ))}
+          </ul>
+        </div>
+      )}
       <h1>我的科目</h1>
+      {subjects.length === 0 && <p className="muted">还没有科目，在下面建一个。</p>}
+      <div className="subject-grid">
+        {subjects.map((s) => (
+          <div className="card subject-card" key={s.id}>
+            <div className="subject-title" onClick={() => onOpen(s.id)}>
+              {s.title}
+            </div>
+            <div className="muted">{s.goal || '（没填学习目标）'}</div>
+            <div className="badges">
+              <span className="badge">知识点 {s.nodeCount}</span>
+              <span className="badge">课堂 {s.sessionCount}</span>
+              {s.mode === 'crash' && (
+                <span className="badge">
+                  <Icon name="zap" size={13} /> 速成{s.purpose ? ` · ${s.purpose}` : ''}
+                  {s.time_budget ? ` · ${s.time_budget}` : ''}
+                </span>
+              )}
+              {s.mode !== 'crash' && (
+                <span className="badge">
+                  <Icon name="route" size={13} /> 常规
+                </span>
+              )}
+              {s.reviewDue > 0 && (
+                <span className="badge hot">
+                  <Icon name="calendar" size={13} /> {s.reviewDue} 个知识点到期复习
+                </span>
+              )}
+              {s.cardDue > 0 && (
+                <span className="badge hot">
+                  <Icon name="layers" size={13} /> {s.cardDue} 张闪卡到期
+                </span>
+              )}
+            </div>
+            <div className="row-end">
+              <button onClick={() => onOpen(s.id)}>进去学</button>
+              <DangerButton onConfirm={() => remove(s.id)} />
+            </div>
+          </div>
+        ))}
+      </div>
       <div className="card">
         <h3>新建科目</h3>
         <div className="form-row">
@@ -705,7 +839,7 @@ function Home({ onOpen, theme }) {
           <span className="muted">学习模式：</span>
           <div className="theme-switch" role="group" aria-label="学习模式">
             <button type="button" className={mode === 'normal' ? 'ts-btn active' : 'ts-btn'} onClick={() => setMode('normal')}>
-              常规
+              <Icon name="route" size={14} /> 常规
             </button>
             <button type="button" className={mode === 'crash' ? 'ts-btn active' : 'ts-btn'} onClick={() => setMode('crash')}>
               <Icon name="zap" size={14} /> 速成
@@ -720,118 +854,6 @@ function Home({ onOpen, theme }) {
           </div>
         )}
         {error && <div className="notice warn">{error}</div>}
-      </div>
-      {subjects.length === 0 && <p className="muted">还没有科目，先在上面建一个。</p>}
-      <div className="subject-grid">
-        {subjects.map((s) => (
-          <div className="card subject-card" key={s.id}>
-            <div className="subject-title" onClick={() => onOpen(s.id)}>
-              {s.title}
-            </div>
-            <div className="muted">{s.goal || '（没填学习目标）'}</div>
-            {theme === 'f' ? (
-              <>
-                <div className="badges">
-                  <span className="badge">知识点 {s.nodeCount}</span>
-                  <span className="badge">课堂 {s.sessionCount}</span>
-                  {s.mode === 'crash' && (
-                    <span className="badge">
-                      <Icon name="zap" size={13} /> 速成{s.purpose ? ` · ${s.purpose}` : ''}{s.time_budget ? ` · ${s.time_budget}` : ''}
-                    </span>
-                  )}
-                </div>
-                {(s.reviewDue > 0 || s.cardDue > 0) && (
-                  <ul className="due-list">
-                    {s.reviewDue > 0 && (
-                      <li>
-                        <span className="badge hot">到期</span>
-                        <span>{s.reviewDue} 个知识点待复习</span>
-                      </li>
-                    )}
-                    {s.cardDue > 0 && (
-                      <li>
-                        <span className="badge hot">到期</span>
-                        <span>{s.cardDue} 张闪卡待复习</span>
-                      </li>
-                    )}
-                  </ul>
-                )}
-              </>
-            ) : (
-              <>
-            <div className="badges">
-              <span className="badge">知识点 {s.nodeCount}</span>
-              <span className="badge">课堂 {s.sessionCount}</span>
-              {s.mode === 'crash' && (
-                <span className="badge">
-                  <Icon name="zap" size={13} /> 速成{s.purpose ? ` · ${s.purpose}` : ''}{s.time_budget ? ` · ${s.time_budget}` : ''}
-                </span>
-              )}
-              {s.reviewDue > 0 && (
-                <span className="badge hot">
-                  <Icon name="calendar" size={13} /> {s.reviewDue} 个知识点到期复习
-                </span>
-              )}
-              {s.cardDue > 0 && (
-                <span className="badge hot due-card">
-                  <Icon name="layers" size={13} /> {s.cardDue} 张闪卡到期
-                </span>
-              )}
-            </div>
-            {(() => {
-              const st = stats[s.id];
-              if (!st || (s.reviewDue === 0 && s.cardDue === 0)) return null;
-              return (
-                <div className="task-list">
-                  {s.reviewDue > 0 && (
-                    <div className="task-card task-green">
-                      <div className="task-head">
-                        <span>
-                          <Icon name="calendar" size={15} /> 每日任务 · 复习
-                        </span>
-                        <span className="task-num">
-                          已通过 {st.passed} / 共 {st.nodes.length}
-                        </span>
-                      </div>
-                      <div className="task-text">{s.reviewDue} 个知识点该复习了，回头复习一下记得更牢。</div>
-                      <div className="seg-bar">
-                        {st.nodes.map((n) => (
-                          <span key={n.id} className={`seg ${n.status === 'passed' ? 'on' : n.status === 'learning' ? 'mid' : ''}`} />
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  {s.cardDue > 0 && (
-                    <div className="task-card task-yellow">
-                      <div className="task-head">
-                        <span>
-                          <Icon name="layers" size={15} /> 每日任务 · 闪卡
-                        </span>
-                        <span className="task-num">
-                          到期 {s.cardDue} / 共 {st.cardTotal} 张
-                        </span>
-                      </div>
-                      <div className="task-text">翻一翻卡片，把快忘的捡回来。</div>
-                      <div className="seg-bar">
-                        {Array.from({ length: st.cardTotal }).map((_, i) => (
-                          <span key={i} className={`seg ${i < s.cardDue ? 'due' : 'on'}`} />
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-              </>
-            )}
-            <div className="row-end">
-              <button onClick={() => onOpen(s.id)}>进去学</button>
-              <button className="danger" onClick={() => remove(s.id)}>
-                删除
-              </button>
-            </div>
-          </div>
-        ))}
       </div>
     </div>
   );
@@ -1216,8 +1238,18 @@ function SubjectView({ subjectId, onOpenSession, onBack, initialTab, openNoteId:
       <h1>{subject.title}</h1>
       <p className="muted">
         目标：{subject.goal || '（未填）'}
-        {subject.mode === 'crash' &&
-          ` · 速成${subject.purpose ? `（用途：${subject.purpose}` : ''}${subject.time_budget ? `，可用时间：${subject.time_budget}` : ''}${subject.purpose ? '）' : ''}`}
+        {subject.mode === 'crash' && (
+          <>
+            {' · '}
+            <Icon name="zap" size={13} /> 速成{subject.purpose ? `（用途：${subject.purpose}` : ''}{subject.time_budget ? `，可用时间：${subject.time_budget}` : ''}{subject.purpose ? '）' : ''}
+          </>
+        )}
+        {subject.mode !== 'crash' && (
+          <>
+            {' · '}
+            <Icon name="route" size={13} /> 常规
+          </>
+        )}
       </p>
       {subject.mode === 'crash' && (
         <OverviewCard subjectId={subjectId} doc={docs.overview} reload={load} />
@@ -1226,10 +1258,8 @@ function SubjectView({ subjectId, onOpenSession, onBack, initialTab, openNoteId:
         {[
           ['lessons', '课堂'],
           ['graph', `知识图谱（${nodes.length}）`],
-          ['cards', '闪卡'],
           ['review', '复习'],
-          ['terms', '术语表'],
-          ['cheat', '速查表'],
+          ['cards', '闪卡'],
           ['notes', `知识库（${notesCount}）`],
           ['import', '导入知识点'],
         ].map(([k, label]) => (
@@ -1254,8 +1284,6 @@ function SubjectView({ subjectId, onOpenSession, onBack, initialTab, openNoteId:
       )}
       {tab === 'cards' && <CardsTab subjectId={subjectId} onJumpToStep={jumpToStep} />}
       {tab === 'review' && <ReviewTab subjectId={subjectId} onOpenSession={onOpenSession} />}
-      {tab === 'terms' && <TermsTab subjectId={subjectId} doc={docs.terms} reload={load} />}
-      {tab === 'cheat' && <CheatTab subjectId={subjectId} subjectTitle={subject.title} doc={docs.cheatsheet} reload={load} />}
       {tab === 'notes' && (
         <NotesTab
           subjectId={subjectId}
@@ -1264,6 +1292,8 @@ function SubjectView({ subjectId, onOpenSession, onBack, initialTab, openNoteId:
           onOpenSession={onOpenSession}
           openEntryId={openNoteId}
           onConsumeOpen={() => setOpenNoteId('')}
+          docs={docs}
+          reloadDocs={load}
         />
       )}
       {tab === 'import' && <ImportTab subjectId={subjectId} reload={load} />}
@@ -1491,7 +1521,7 @@ function mindmapToMarkdown(data) {
   }
 }
 
-function NotesTab({ subjectId, subjectTitle, sessions, onOpenSession, openEntryId, onConsumeOpen }) {
+function NotesTab({ subjectId, subjectTitle, sessions, onOpenSession, openEntryId, onConsumeOpen, docs, reloadDocs }) {
   const [entries, setEntries] = useState([]);
   const [filter, setFilter] = useState('all');
   const [selected, setSelected] = useState(null); // 打开看的条目详情 {entry, full}
@@ -1541,8 +1571,6 @@ function NotesTab({ subjectId, subjectTitle, sessions, onOpenSession, openEntryI
     }
   }
   async function remove(entry) {
-    const label = NOTE_KIND_LABEL[entry.kind] || '条目';
-    if (!confirm(`删掉这份${label}《${entry.title}》？删了就没了。`)) return;
     setError('');
     try {
       await api.del(`/api/notes/${entry.entryId}`);
@@ -1609,9 +1637,11 @@ function NotesTab({ subjectId, subjectTitle, sessions, onOpenSession, openEntryI
           <button className="small" onClick={downloadDoc}>
             <Icon name="download" size={15} /> 下载 Markdown
           </button>
-          <button className="danger small" onClick={() => remove(entry)}>
-            删除这份{NOTE_KIND_LABEL[kind] || '文档'}
-          </button>
+          <DangerButton
+            className="small"
+            label={`删除这份${NOTE_KIND_LABEL[kind] || '文档'}`}
+            onConfirm={() => remove(entry)}
+          />
         </div>
         <h3>
           <Icon name={isMindmapEntry ? 'network' : 'sticky-note'} size={18} /> {entry.title}
@@ -1674,7 +1704,7 @@ function NotesTab({ subjectId, subjectTitle, sessions, onOpenSession, openEntryI
   return (
     <div>
       <p className="muted">
-        这里只放老师在上课时按你的要求生成的文档：每一步的笔记、知识点的笔记和思维导图。你在课堂里点「生成笔记」或「思维导图」，老师就把那一步的讲解、你的预测和练习错因整理成一份文档存到这里。总览、术语表、速查表在各自的页签里，不放在这个库里。
+        这里只放老师在上课时按你的要求生成的文档：每一步的笔记、知识点的笔记和思维导图。你在课堂里点「生成笔记」或「思维导图」，老师就把那一步的讲解、你的预测和练习错因整理成一份文档存到这里。总览、术语表、速查表在本页下方的生成区里，不混进这个文档列表。
       </p>
       {entries.length > 1 && (
         <div className="row lib-filters">
@@ -1692,26 +1722,44 @@ function NotesTab({ subjectId, subjectTitle, sessions, onOpenSession, openEntryI
       {entries.length > 0 && shown.length === 0 && <p className="muted">这一类暂时还没有。</p>}
       <ul className="plain-list">
         {shown.map((e) => (
-          <li key={e.entryId} className="card row-between">
-            <span className="linklike" onClick={() => open(e)}>
+          <li key={e.entryId} className="card note-row">
+            <div className="note-row-title linklike" onClick={() => open(e)}>
               <Icon name={e.kind === 'mindmap' ? 'network' : 'sticky-note'} size={15} /> {e.title}
               <span className="badge">{NOTE_KIND_LABEL[e.kind] || e.kind}</span>
               {e.style && <span className="badge">{NOTE_STYLE_LABEL[e.style] || e.style}</span>}
               {e.kind === 'step' && e.has_mindmap ? <span className="badge">有思维导图</span> : null}
-            </span>
-            <span className="row">
+            </div>
+            <div className="note-row-meta">
               <span className="muted">
                 {e.updated_at !== e.created_at
                   ? `${new Date(e.updated_at).toLocaleString()} 更新`
                   : `${new Date(e.created_at).toLocaleString()} 生成`}
               </span>
-              <button className="danger small" onClick={() => remove(e)}>
-                删除
-              </button>
-            </span>
+              <DangerButton className="small" onConfirm={() => remove(e)} />
+            </div>
           </li>
         ))}
       </ul>
+      {/* 生成区（与空间版一致）：总览/术语表/速查表在这里生成和查看，不混进上面的文档列表 */}
+      <div className="kb-gen">
+        <h3>
+          <Icon name="sparkles" size={17} /> 让老师整理
+        </h3>
+        <p className="muted">一页纸总览、术语表、速查表在这里生成；生成完就在下面打开看，不进上面的文档列表。</p>
+        <OverviewCard subjectId={subjectId} doc={docs ? docs.overview : null} reload={reloadDocs} />
+        <div className="card">
+          <h3>
+            <Icon name="bookmark" size={17} /> 术语表
+          </h3>
+          <TermsTab subjectId={subjectId} doc={docs ? docs.terms : null} reload={reloadDocs} />
+        </div>
+        <div className="card">
+          <h3>
+            <Icon name="file-text" size={17} /> 速查表
+          </h3>
+          <CheatTab subjectId={subjectId} subjectTitle={subjectTitle} doc={docs ? docs.cheatsheet : null} reload={reloadDocs} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -1734,7 +1782,6 @@ function LessonsTab({ subjectId, sessions, onOpenSession, reload }) {
     }
   }
   async function remove(id) {
-    if (!confirm('删掉这节课？这节课的复习记录也会一起清掉。')) return;
     await api.del(`/api/sessions/${id}`);
     reload();
   }
@@ -1774,9 +1821,7 @@ function LessonsTab({ subjectId, sessions, onOpenSession, reload }) {
               <Icon name={s.kind === 'review' ? 'calendar' : 'book-open'} size={15} /> {s.kind === 'review' ? '复习课' : '课堂'} #{s.id} · {PHASE_LABEL[s.phase] || s.phase} ·{' '}
               {new Date(s.created_at).toLocaleString()}
             </span>
-            <button className="danger small" onClick={() => remove(s.id)}>
-              删除
-            </button>
+            <DangerButton className="small" onConfirm={() => remove(s.id)} />
           </li>
         ))}
       </ul>
@@ -2167,9 +2212,7 @@ function CardsTab({ subjectId, onJumpToStep }) {
             <span>
               {c.front} <span className="muted">（{c.node_title || '未挂知识点'} · {new Date(c.due_at).toLocaleString()} 到期）</span>
             </span>
-            <button className="danger small" onClick={() => remove(c.id)}>
-              删除
-            </button>
+            <DangerButton className="small" onConfirm={() => remove(c.id)} />
           </li>
         ))}
       </ul>

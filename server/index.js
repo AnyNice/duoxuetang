@@ -298,13 +298,38 @@ app.get('/api/subjects', (req, res) => {
     : db.prepare('SELECT * FROM subjects ORDER BY id DESC').all();
   const out = subjects.map((s) => {
     const nodeCount = db.prepare('SELECT COUNT(*) c FROM nodes WHERE subject_id=?').get(s.id).c;
+    const passedCount = db
+      .prepare("SELECT COUNT(*) c FROM nodes WHERE subject_id=? AND status='passed'")
+      .get(s.id).c;
     const cardDue = db
       .prepare('SELECT COUNT(*) c FROM cards WHERE subject_id=? AND due_at<=?')
       .get(s.id, now()).c;
     const plan = reviewPlanFor(s.id);
     const reviewDue = plan.filter((p) => p.hasEvents && p.due).length;
     const sessionCount = db.prepare('SELECT COUNT(*) c FROM sessions WHERE subject_id=?').get(s.id).c;
-    return { ...s, nodeCount, cardDue, reviewDue, sessionCount };
+    // 已完成步数（首页胶囊用）：正课里学完的步——done/quiz 算整节路线学完，learning 算已走过的 step_index 步。
+    // 进行中的课（「继续上课」卡用）：最近一节没上完的正课（摸底/教学/练习都算在进行中）。
+    let doneSteps = 0;
+    let activeSession = null;
+    const lessons = db
+      .prepare(
+        "SELECT id, phase, step_index, roadmap_json, updated_at FROM sessions WHERE subject_id=? AND kind='lesson' ORDER BY id DESC"
+      )
+      .all(s.id);
+    for (const ss of lessons) {
+      if (ss.phase === 'done' || ss.phase === 'quiz') {
+        let total = ss.step_index || 0;
+        const rm = ss.roadmap_json ? safeParse(ss.roadmap_json) : null;
+        if (rm && Array.isArray(rm.steps) && rm.steps.length) total = rm.steps.length;
+        doneSteps += total;
+      } else if (ss.phase === 'learning') {
+        doneSteps += ss.step_index || 0;
+      }
+      if (!activeSession && ss.phase !== 'done') {
+        activeSession = { id: ss.id, phase: ss.phase, stepIndex: ss.step_index, updatedAt: ss.updated_at };
+      }
+    }
+    return { ...s, nodeCount, passedCount, cardDue, reviewDue, sessionCount, doneSteps, activeSession };
   });
   res.json(out);
 });
